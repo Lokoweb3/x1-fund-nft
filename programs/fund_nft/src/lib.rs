@@ -1,6 +1,7 @@
 //! Fund NFT. Each NFT owns a vault that dollar-cost-averages its quote token
 //! into a fixed basket. There is no admin, pause, owner, or fee switch.
 
+pub mod accounting;
 pub mod errors;
 pub mod instructions;
 pub mod state;
@@ -19,6 +20,10 @@ pub mod fund_nft {
     use super::*;
 
     pub fn create_fund(ctx: Context<CreateFund>, params: CreateFundParams) -> Result<()> {
-        instructions::create_fund::handle(ctx, params)
+        instructions::create_fund::handle_create_fund(ctx, params)
+    }
+
+    pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+        instructions::deposit::handle_deposit(ctx, amount)
     }
 }

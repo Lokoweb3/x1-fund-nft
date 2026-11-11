@@ -43,7 +43,7 @@ pub struct CreateFund<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn handle(ctx: Context<CreateFund>, params: CreateFundParams) -> Result<()> {
+pub fn handle_create_fund(ctx: Context<CreateFund>, params: CreateFundParams) -> Result<()> {
     let quote_mint = ctx.accounts.quote_mint.key();
     let nft_mint = ctx.accounts.nft_mint.key();
     require!(quote_mint != nft_mint, FundError::QuoteMintMismatch);

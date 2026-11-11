@@ -44,3 +44,16 @@ anchor build
 `anchor build`: success. Release profile finished in 58.30s. Artifact `target/deploy/fund_nft.so` (181K). Program id stayed `BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck`. `cargo-build-sbf --version` still reports platform-tools **v1.54** (the tools shipped with Agave CLI 4.1.2). Anchor's release notes mention platform-tools v1.57; that version was not what this CLI downloaded.
 
 `anchor-spl` 1.2.2 `CpiContext::new_with_signer` takes a `Pubkey`, not an `AccountInfo`. `token_interface::mint_to` passes account infos in a different order from `spl_token_2022::instruction::mint_to`, so `create_fund` builds that instruction directly and passes `[mint, destination, authority]`. `set_authority` uses the helper, whose order matches the instruction.
+
+## Step 3 — `deposit`
+
+Commands:
+
+```bash
+cargo test -p fund_nft --lib -- --test-threads=8
+anchor build
+```
+
+`cargo test` compile: success (0.87s incremental). Test result: **13 passed, 0 failed**. The two new tests cover deposit rounding (3 units at 50/50 becomes 2 and 1, remainder on the first target; 1_000_000 at 20/80 becomes 200_000 and 800_000) and the quote-withdrawal budget reduction used by the later `withdraw` instruction.
+
+`anchor build`: success. Release profile finished in 1.31s. The Anchor 1.2 program macro expects each `#[derive(Accounts)]` helper module to be glob-reexported to the crate root, so the instruction modules are re-exported and the handlers have distinct names.
