@@ -70,3 +70,38 @@ anchor build
 `cargo test` compile: success. Test result: **17 passed, 0 failed**. New tests: the 10 bps slice (budget 800_000, per-run 500_000, weight 8_000, vault 1_000_000 → slice 400_000, tip 400, swap input 399_600), pool and observation offset round-trips, amm config fee 2800, and the Token-2022 fee TLV (older schedule before the newer epoch, newer schedule at that epoch, classic 82-byte mint has no fee).
 
 `anchor build`: success. Release profile finished in 1.82s. No stack-frame warning from the SBF build.
+
+## Step 5 — `withdraw`
+
+Commands:
+
+```bash
+cargo test -p fund_nft --lib --offline -- --test-threads=8
+anchor build
+```
+
+`cargo test` compile: success. Test result: **17 passed, 0 failed**. The quote-budget reduction used by `withdraw` was already covered in step 3 (100_000 out of budgets 200_000 and 400_000 becomes 166_666 and 333_334). No new host test was added; the instruction is covered by the clone test in step 6.
+
+`anchor build`: success. Release profile finished in 1.94s.
+
+## Step 6 — mainnet-clone integration test
+
+Command:
+
+```bash
+cargo test -p fund-nft-tests -- --test-threads=1 cloned_usdc_test_pool_create_deposit_dca_withdraw --nocapture
+```
+
+Compile: success. Test result: **1 passed, 0 failed**, about 5 seconds.
+
+The local validator is Agave 4.1.2 `solana-test-validator`. It clones the XDEX program (upgradeable), the USDC.X/TEST pool, amm config, both vaults, the observation account, the pool authority, and the TEST mint from `https://rpc.mainnet.x1.xyz`. The USDC.X mint is that same cloned account with one labeled change: its mint authority is set to the test payer so the test can mint USDC.X. `--clone-feature-set` was tried first and the validator exited with `ELF error: Detected sbpf_version required by the executable which are not enabled` (the fund program's SBF version is not in the feature set cloned from X1's 4.0.4). The passing run does not clone the feature set, so the validator uses its own defaults. That was enough to execute the cloned XDEX program.
+
+The test creates a fund (20% USDC.X cash, 80% TEST, window chosen from the cloned observations), deposits 1_000_000 raw USDC.X, cranks the TEST target, and checks that the TEST received by the vault equals the pool vault's decrease minus the ceiling 5% transfer fee. It then withdraws half the TEST (budgets unchanged) and 100_000 USDC.X (budgets become 166_666 and 333_334). A second signer who does not hold the NFT cannot withdraw. The `DcaExecuted` min-out from the transaction logs is below the pre-fee gross and no greater than the amount received.
+
+## Step 7 — keeper typecheck
+
+```bash
+cd keeper && npm install && npx tsc --noEmit
+```
+
+`tsc --noEmit` exited 0 with `@anchor-lang/core` 1.2.2 and `@solana/web3.js` 1.99.0. A dry run against `https://rpc.mainnet.x1.xyz` (`npx tsx src/index.ts --dry-run`) printed `0 program accounts, 0 due targets` and did not send a transaction.
