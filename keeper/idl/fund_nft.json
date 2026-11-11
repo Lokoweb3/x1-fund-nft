@@ -1,0 +1,689 @@
+{
+  "address": "BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck",
+  "metadata": {
+    "name": "fund_nft",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Fund NFT: a vault that dollar-cost-averages quote tokens through XDEX"
+  },
+  "instructions": [
+    {
+      "name": "create_fund",
+      "discriminator": [
+        38,
+        128,
+        18,
+        11,
+        203,
+        0,
+        153,
+        21
+      ],
+      "accounts": [
+        {
+          "name": "creator",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "fund",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "nft_mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "nft_mint",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "creator_nft_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "creator"
+              },
+              {
+                "kind": "account",
+                "path": "token_program"
+              },
+              {
+                "kind": "account",
+                "path": "nft_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "quote_mint"
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "CreateFundParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "deposit",
+      "discriminator": [
+        242,
+        35,
+        198,
+        137,
+        82,
+        225,
+        242,
+        182
+      ],
+      "accounts": [
+        {
+          "name": "depositor",
+          "signer": true
+        },
+        {
+          "name": "fund",
+          "writable": true
+        },
+        {
+          "name": "quote_mint"
+        },
+        {
+          "name": "depositor_quote",
+          "writable": true
+        },
+        {
+          "name": "quote_vault",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "execute_dca",
+      "discriminator": [
+        129,
+        25,
+        89,
+        105,
+        132,
+        188,
+        156,
+        3
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "signer": true
+        },
+        {
+          "name": "fund",
+          "writable": true
+        },
+        {
+          "name": "quote_mint"
+        },
+        {
+          "name": "target_mint"
+        },
+        {
+          "name": "quote_vault",
+          "writable": true
+        },
+        {
+          "name": "target_vault",
+          "writable": true
+        },
+        {
+          "name": "caller_quote_account",
+          "writable": true
+        },
+        {
+          "name": "quote_token_program"
+        },
+        {
+          "name": "target_token_program"
+        },
+        {
+          "name": "pool_program"
+        },
+        {
+          "name": "pool_state",
+          "writable": true
+        },
+        {
+          "name": "amm_config"
+        },
+        {
+          "name": "authority"
+        },
+        {
+          "name": "pool_input_vault",
+          "writable": true
+        },
+        {
+          "name": "pool_output_vault",
+          "writable": true
+        },
+        {
+          "name": "pool_input_mint"
+        },
+        {
+          "name": "pool_output_mint"
+        },
+        {
+          "name": "pool_input_token_program"
+        },
+        {
+          "name": "pool_output_token_program"
+        },
+        {
+          "name": "observation_state",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "target_index",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "withdraw",
+      "discriminator": [
+        183,
+        18,
+        70,
+        156,
+        148,
+        109,
+        161,
+        34
+      ],
+      "accounts": [
+        {
+          "name": "holder",
+          "signer": true
+        },
+        {
+          "name": "fund",
+          "writable": true
+        },
+        {
+          "name": "nft_mint"
+        },
+        {
+          "name": "nft_account"
+        },
+        {
+          "name": "nft_token_program"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "destination",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Fund",
+      "discriminator": [
+        62,
+        128,
+        183,
+        208,
+        91,
+        31,
+        212,
+        209
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "DcaExecuted",
+      "discriminator": [
+        22,
+        30,
+        154,
+        215,
+        120,
+        146,
+        26,
+        69
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "TooManyTargets",
+      "msg": "A fund has at most 8 targets"
+    },
+    {
+      "code": 6001,
+      "name": "EmptyTargets",
+      "msg": "A fund needs at least one target"
+    },
+    {
+      "code": 6002,
+      "name": "BpsSum",
+      "msg": "Target weights must sum to 10000 bps"
+    },
+    {
+      "code": 6003,
+      "name": "DuplicateMint",
+      "msg": "Target mints must be unique"
+    },
+    {
+      "code": 6004,
+      "name": "CashPoolNotDefault",
+      "msg": "The cash slice must use the default pool address"
+    },
+    {
+      "code": 6005,
+      "name": "PoolRequired",
+      "msg": "A swapped target must pin a pool"
+    },
+    {
+      "code": 6006,
+      "name": "DuplicatePool",
+      "msg": "Two targets cannot pin the same pool"
+    },
+    {
+      "code": 6007,
+      "name": "ZeroBps",
+      "msg": "A target weight must be greater than zero"
+    },
+    {
+      "code": 6008,
+      "name": "BadWindow",
+      "msg": "The TWAP window must be greater than zero"
+    },
+    {
+      "code": 6009,
+      "name": "BadInterval",
+      "msg": "The DCA interval must be greater than zero"
+    },
+    {
+      "code": 6010,
+      "name": "BadDeviation",
+      "msg": "max_dev_bps cannot exceed 10000"
+    },
+    {
+      "code": 6011,
+      "name": "ZeroPerRun",
+      "msg": "per_run_quote must be greater than zero"
+    },
+    {
+      "code": 6012,
+      "name": "NftTokenProgram",
+      "msg": "The fund NFT must use the classic SPL token program"
+    },
+    {
+      "code": 6013,
+      "name": "ZeroAmount",
+      "msg": "Amount must be greater than zero"
+    },
+    {
+      "code": 6014,
+      "name": "NotDue",
+      "msg": "This target is not due yet"
+    },
+    {
+      "code": 6015,
+      "name": "CashSlice",
+      "msg": "The cash slice is never swapped"
+    },
+    {
+      "code": 6016,
+      "name": "EmptyBudget",
+      "msg": "This target has no budget left"
+    },
+    {
+      "code": 6017,
+      "name": "ZeroSlice",
+      "msg": "The quote slice rounded to zero"
+    },
+    {
+      "code": 6018,
+      "name": "BadPool",
+      "msg": "The pool account is not the pinned XDEX pool"
+    },
+    {
+      "code": 6019,
+      "name": "PoolMintMismatch",
+      "msg": "The pool mints are not the quote mint and the target mint"
+    },
+    {
+      "code": 6020,
+      "name": "BadObservation",
+      "msg": "The observation account does not belong to this pool"
+    },
+    {
+      "code": 6021,
+      "name": "TwapRejected",
+      "msg": "The TWAP guard rejected the quote"
+    },
+    {
+      "code": 6022,
+      "name": "Slippage",
+      "msg": "The vault received less than the TWAP minimum"
+    },
+    {
+      "code": 6023,
+      "name": "BadNft",
+      "msg": "The signer does not hold the fund NFT"
+    },
+    {
+      "code": 6024,
+      "name": "BadVault",
+      "msg": "The vault is not the fund's associated token account"
+    },
+    {
+      "code": 6025,
+      "name": "BadTipDestination",
+      "msg": "The tip account is not the caller's quote token account"
+    },
+    {
+      "code": 6026,
+      "name": "Math",
+      "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6027,
+      "name": "BadTokenProgram",
+      "msg": "The token program does not match the mint"
+    },
+    {
+      "code": 6028,
+      "name": "BadAuthority",
+      "msg": "The pool authority is not the owner of the pool vault"
+    },
+    {
+      "code": 6029,
+      "name": "QuoteMintMismatch",
+      "msg": "The quote mint does not match the fund"
+    },
+    {
+      "code": 6030,
+      "name": "TargetIndex",
+      "msg": "Target index is out of range"
+    },
+    {
+      "code": 6031,
+      "name": "BadDestination",
+      "msg": "The destination token account must belong to the NFT holder"
+    }
+  ],
+  "types": [
+    {
+      "name": "CreateFundParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "per_run_quote",
+            "type": "u64"
+          },
+          {
+            "name": "interval_secs",
+            "type": "i64"
+          },
+          {
+            "name": "twap_window_secs",
+            "type": "u32"
+          },
+          {
+            "name": "max_dev_bps",
+            "type": "u16"
+          },
+          {
+            "name": "targets",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "TargetParams"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "DcaExecuted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "fund",
+            "type": "pubkey"
+          },
+          {
+            "name": "target_index",
+            "type": "u8"
+          },
+          {
+            "name": "slice",
+            "type": "u64"
+          },
+          {
+            "name": "tip",
+            "type": "u64"
+          },
+          {
+            "name": "amount_in",
+            "type": "u64"
+          },
+          {
+            "name": "min_out",
+            "type": "u64"
+          },
+          {
+            "name": "received",
+            "type": "u64"
+          },
+          {
+            "name": "budget_after",
+            "type": "u64"
+          },
+          {
+            "name": "unix_timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Fund",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "nft_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "quote_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "per_run_quote",
+            "type": "u64"
+          },
+          {
+            "name": "interval_secs",
+            "type": "i64"
+          },
+          {
+            "name": "twap_window_secs",
+            "type": "u32"
+          },
+          {
+            "name": "max_dev_bps",
+            "type": "u16"
+          },
+          {
+            "name": "targets",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "Target"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Target",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "bps",
+            "type": "u16"
+          },
+          {
+            "name": "budget",
+            "type": "u64"
+          },
+          {
+            "name": "last_run",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TargetParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "bps",
+            "type": "u16"
+          }
+        ]
+      }
+    }
+  ]
+}
