@@ -32,4 +32,8 @@ pub mod fund_nft {
     pub fn execute_dca(ctx: Context<ExecuteDca>, target_index: u8) -> Result<()> {
         instructions::execute_dca::handle_execute_dca(ctx, target_index)
     }
+
+    pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
+        instructions::withdraw::handle_withdraw(ctx, amount)
+    }
 }
