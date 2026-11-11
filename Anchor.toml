@@ -1,0 +1,22 @@
+[toolchain]
+anchor_version = "1.2.2"
+solana_version = "4.1.2"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+fund_nft = "BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck"
+
+[programs.testnet]
+fund_nft = "BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "cargo test"
+
+[hooks]

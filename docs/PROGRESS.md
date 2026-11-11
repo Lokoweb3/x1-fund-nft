@@ -29,3 +29,18 @@ Tests: **10 passed, 0 failed**.
 - output transfer fee then `max_dev_bps`
 - transfer-fee cap
 - wide `mul_div` property check (300 random products)
+
+## Step 2 — `create_fund`
+
+Commands:
+
+```bash
+cargo test -p fund_nft --lib -- --test-threads=8
+anchor build
+```
+
+`cargo test` compile: success, rustc 1.89.0, `fund_nft v0.1.0`. Test result: **11 passed, 0 failed** (the step 1 TWAP tests plus two `validate_create` tests: a cash slice plus one pool is accepted; bad weights, duplicate mints, an unpinned swap pool, and a cash slice with a non-default pool are rejected).
+
+`anchor build`: success. Release profile finished in 58.30s. Artifact `target/deploy/fund_nft.so` (181K). Program id stayed `BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck`. `cargo-build-sbf --version` still reports platform-tools **v1.54** (the tools shipped with Agave CLI 4.1.2). Anchor's release notes mention platform-tools v1.57; that version was not what this CLI downloaded.
+
+`anchor-spl` 1.2.2 `CpiContext::new_with_signer` takes a `Pubkey`, not an `AccountInfo`. `token_interface::mint_to` passes account infos in a different order from `spl_token_2022::instruction::mint_to`, so `create_fund` builds that instruction directly and passes `[mint, destination, authority]`. `set_authority` uses the helper, whose order matches the instruction.
