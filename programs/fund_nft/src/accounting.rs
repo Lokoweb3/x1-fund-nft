@@ -4,6 +4,48 @@
 pub enum AccountingError {
     Shape,
     Overflow,
+    ZeroSlice,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlicePlan {
+    pub slice: u64,
+    pub tip: u64,
+    pub amount_in: u64,
+}
+
+/// `slice = min(budget, per_run * bps / 10_000, vault)`.
+/// `tip = slice * tip_bps / 10_000`. The swap input is `slice - tip`.
+pub fn plan_slice(
+    budget: u64,
+    per_run_quote: u64,
+    bps: u16,
+    vault_balance: u64,
+    tip_bps: u64,
+) -> Result<SlicePlan, AccountingError> {
+    if budget == 0 || bps == 0 {
+        return Err(AccountingError::ZeroSlice);
+    }
+    let cap = (per_run_quote as u128) * u128::from(bps) / 10_000;
+    let cap = u64::try_from(cap).unwrap_or(u64::MAX);
+    let slice = budget.min(cap).min(vault_balance);
+    if slice == 0 {
+        return Err(AccountingError::ZeroSlice);
+    }
+    let tip = (slice as u128)
+        .checked_mul(tip_bps as u128)
+        .ok_or(AccountingError::Overflow)?
+        / 10_000;
+    let tip = u64::try_from(tip).map_err(|_| AccountingError::Overflow)?;
+    let amount_in = slice.checked_sub(tip).ok_or(AccountingError::Overflow)?;
+    if amount_in == 0 {
+        return Err(AccountingError::ZeroSlice);
+    }
+    Ok(SlicePlan {
+        slice,
+        tip,
+        amount_in,
+    })
 }
 
 /// Add `received` quote units to budgets in proportion to `weights` (bps).
@@ -91,6 +133,20 @@ pub fn debit_budgets(budgets: &mut [u64], amount: u64) -> Result<(), AccountingE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slice_keeps_a_ten_bps_tip_out_of_the_swap() {
+        let plan = plan_slice(800_000, 500_000, 8_000, 1_000_000, 10).unwrap();
+        assert_eq!(
+            plan,
+            SlicePlan {
+                slice: 400_000,
+                tip: 400,
+                amount_in: 399_600,
+            }
+        );
+        assert!(plan_slice(0, 500_000, 8_000, 1_000_000, 10).is_err());
+    }
 
     #[test]
     fn deposit_remainder_goes_to_the_first_target() {

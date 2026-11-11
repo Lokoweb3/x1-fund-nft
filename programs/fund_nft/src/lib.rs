@@ -5,7 +5,9 @@ pub mod accounting;
 pub mod errors;
 pub mod instructions;
 pub mod state;
+pub mod token_fee;
 pub mod twap;
+pub mod xdex;
 
 use anchor_lang::prelude::*;
 
@@ -25,5 +27,9 @@ pub mod fund_nft {
 
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         instructions::deposit::handle_deposit(ctx, amount)
+    }
+
+    pub fn execute_dca(ctx: Context<ExecuteDca>, target_index: u8) -> Result<()> {
+        instructions::execute_dca::handle_execute_dca(ctx, target_index)
     }
 }

@@ -84,6 +84,7 @@ pub fn handle_deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
 
 fn map_accounting(err: AccountingError) -> Error {
     match err {
+        AccountingError::ZeroSlice => error!(FundError::ZeroSlice),
         AccountingError::Shape | AccountingError::Overflow => error!(FundError::Math),
     }
 }

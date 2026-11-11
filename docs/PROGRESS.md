@@ -57,3 +57,16 @@ anchor build
 `cargo test` compile: success (0.87s incremental). Test result: **13 passed, 0 failed**. The two new tests cover deposit rounding (3 units at 50/50 becomes 2 and 1, remainder on the first target; 1_000_000 at 20/80 becomes 200_000 and 800_000) and the quote-withdrawal budget reduction used by the later `withdraw` instruction.
 
 `anchor build`: success. Release profile finished in 1.31s. The Anchor 1.2 program macro expects each `#[derive(Accounts)]` helper module to be glob-reexported to the crate root, so the instruction modules are re-exported and the handlers have distinct names.
+
+## Step 4 — `execute_dca`
+
+Commands:
+
+```bash
+cargo test -p fund_nft --lib --offline -- --test-threads=8
+anchor build
+```
+
+`cargo test` compile: success. Test result: **17 passed, 0 failed**. New tests: the 10 bps slice (budget 800_000, per-run 500_000, weight 8_000, vault 1_000_000 → slice 400_000, tip 400, swap input 399_600), pool and observation offset round-trips, amm config fee 2800, and the Token-2022 fee TLV (older schedule before the newer epoch, newer schedule at that epoch, classic 82-byte mint has no fee).
+
+`anchor build`: success. Release profile finished in 1.82s. No stack-frame warning from the SBF build.
