@@ -144,6 +144,36 @@ mod tests {
     }
 
     #[test]
+    fn raydium_authority_seed_against_the_known_mainnet_address() {
+        // The XDEX IDL does not document the authority PDA seeds. This checks
+        // the seed string used by Raydium cp-swap against the authority that
+        // signed the reference swap. It is not used by the program.
+        let program: Pubkey = "sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN"
+            .parse()
+            .unwrap();
+        let known: Pubkey = "9Dpjw2pB5kXJr6ZTHiqzEMfJPic3om9jgNacnwpLCoaU"
+            .parse()
+            .unwrap();
+        let (pda, bump) = Pubkey::find_program_address(&[b"vault_and_lp_mint_auth_seed"], &program);
+        assert_eq!(pda, known);
+        // PoolState.auth_bump on the USDC.X/TEST pool is 255.
+        assert_eq!(bump, 255);
+
+        // Same seed under the program id that owns X1 testnet pools.
+        let testnet: Pubkey = "7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf"
+            .parse()
+            .unwrap();
+        let testnet_vault_owner: Pubkey = "2HbqjtA9gB9c95c8KkUUWxhtNjCfYcPbvfdhcdobbq1C"
+            .parse()
+            .unwrap();
+        let (testnet_pda, testnet_bump) =
+            Pubkey::find_program_address(&[b"vault_and_lp_mint_auth_seed"], &testnet);
+        assert_eq!(testnet_pda, testnet_vault_owner);
+        // auth_bump byte on testnet pool 5vfq8dsnMqnP4w9WmZYCv4VjcwXK1sfTQy6rprvHK6ah.
+        assert_eq!(testnet_bump, 251);
+    }
+
+    #[test]
     fn amm_config_fee_and_observation_ring() {
         let mut config = vec![0u8; AMM_CONFIG_LEN];
         config[..8].copy_from_slice(&AMM_CONFIG_DISCRIMINATOR);

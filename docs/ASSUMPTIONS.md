@@ -53,7 +53,8 @@ Denominators 10_000, 100_000, 10_000_000, and 1_000_000_000 with rate 2800 do no
 - `anchor-spl` 1.2.2 `token_interface::mint_to` passes account infos as `[destination, mint, authority]`. `spl_token_2022::instruction::mint_to` orders them `[mint, destination, authority]`. `create_fund` invokes that instruction directly. `transfer_checked` and `set_authority` use the helpers; their account order matches the instruction builders.
 - The pool authority is not a field in `PoolState`. The keeper reads the owner at byte 32 of the input vault token account. On the USDC.X/TEST pool that owner is the authority in the spec.
 - Epoch selection for a transfer fee uses the Token-2022 rule: the newer schedule once `clock.epoch >= newer.epoch`, otherwise the older one. TEST's two schedules are identical, so mainnet does not show which branch is live. The field layout itself was read off the mint.
-- `minimum_amount_out` in the reference swap (5083957157322) is below both the pre-fee output and the post-fee amount, so that transaction does not show which side the pool compares. The program passes the post-fee TWAP minimum, which is what the spec describes, and then requires the vault's balance increase to be at least that minimum. The cloned-pool test's swap was accepted with that minimum.
+- `minimum_amount_out` in the reference swap (5083957157322) is below both the pre-fee output and the post-fee amount, so that transaction alone does not show which side the pool compares. A direct swap on the cloned pool does. A 20_000 raw USDC.X swap matched the reserve formula exactly, including the 5% ceiling fee. The same size swap with `minimum_amount_out` set to one raw unit above that post-fee amount, and still below the pre-fee amount, was rejected with XDEX error 6005 `ExceededSlippage` ("Exceeds desired slippage limit"). The pool therefore compares the minimum to the amount the destination receives after the output transfer fee. The fund program passes that post-fee figure, and the clone test checks the rejection.
+- The XDEX IDL does not document the pool-authority seeds. Deriving `["vault_and_lp_mint_auth_seed"]` — the seed string from Raydium cp-swap, not from the XDEX IDL — against mainnet program `sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN` yields `9Dpjw2pB5kXJr6ZTHiqzEMfJPic3om9jgNacnwpLCoaU` with bump 255, which is the reference-swap authority and the pool's `auth_bump` byte. The same seed against testnet program `7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf` yields `2HbqjtA9gB9c95c8KkUUWxhtNjCfYcPbvfdhcdobbq1C` with bump 251, which is the owner of testnet pool `5vfq8dsnMqnP4w9WmZYCv4VjcwXK1sfTQy6rprvHK6ah`'s token-0 vault and that pool's `auth_bump`. The program and the keeper still take the authority from the vault token-account owner rather than deriving it.
 
 ## JACK, PEPE, GOOGL.X
 
@@ -87,12 +88,10 @@ X1 Mainnet pools, with the API's `tvl` field:
 
 ## Unverified
 
-- Whether XDEX compares `minimum_amount_out` to the pre-fee or post-fee amount. The clone test only shows that a post-fee minimum was accepted.
-- The transfer-fee epoch rule, as noted above. The byte layout is verified.
-- PDA seeds for the pool authority. The address was taken from the reference transaction and from the vault token-account owner, not derived.
+- The transfer-fee epoch rule, as noted above. The byte layout is verified. Both of TEST's schedules are 500 bps, so the branch is not observable on that mint.
 - That every XDEX pool uses this same 637-byte layout. Only the USDC.X/TEST pool was decoded.
 - Behavior of a classic (non-Token-2022) quote or target mint on X1, other than the fund NFT itself.
-- Testnet XDEX program id, pool addresses, and whether `solana airdrop` is served by `https://rpc.testnet.x1.xyz`.
+- Whether `solana airdrop` is served by `https://rpc.testnet.x1.xyz`. The testnet pool program id is no longer unknown: three X1 Testnet pools (`5vfq8dsnMqnP4w9WmZYCv4VjcwXK1sfTQy6rprvHK6ah`, `8LS7wHkFTozCYcqPwF51Hdd3PJvxzMB5uTah3A73tSav`, `HgoLsyGfYULwSBA1P3jnUGiTnkUSYqY79Pr4ZWccH1JX`) are 637-byte `PoolState` accounts owned by `7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf`, which is the address in the XDEX IDL. That is not the mainnet program id.
 - The API's `tvl` units and how it picks among several pools for one pair. The numbers above are the raw field.
 - Agave 4.4.1 and Anchor's `solana-v4` feature were not built or tested.
 - `anchor-spl` 1.2.2's `mint_to` account order was read from the crate source and avoided. It was not executed.

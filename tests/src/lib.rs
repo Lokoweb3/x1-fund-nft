@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anchor_client::{Client, Cluster, CommitmentConfig};
-use anchor_lang::prelude::{Pubkey, System};
+use anchor_lang::prelude::{AccountMeta, Pubkey, System};
 use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::Id;
 use base64::Engine;
@@ -303,7 +303,11 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
     // even before the deviation haircut.
     assert!(min_out < gross);
 
-    let withdraw_test = received / 2;
+    // The reference swap's min-out was below both the pre-fee and post-fee
+    // amounts, so it did not show which one the pool enforces. Ask the cloned
+    // program directly. First confirm the reserve formula on a fresh quote,
+    // then submit the same-sized swap with min-out one unit above the
+    // post-fee amount and still far below the pre-fee amount.
     let payer_test = ata(&payer.pubkey(), &test_mint, &token_2022);
     program
         .request()
@@ -313,6 +317,59 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
             &test_mint,
             &token_2022,
         )))
+        .send()
+        .expect("payer test ata");
+    let probe_in = 20_000u64;
+    let (predicted_gross, predicted_recv) =
+        quote_pool_swap(&account_data(&rpc, &pubkey(POOL)), &rpc, probe_in);
+    let vault1_before = token_amount(&account_data(&rpc, &pubkey(VAULT_1)));
+    let user_before = token_amount(&account_data(&rpc, &payer_test));
+    program
+        .request()
+        .instruction(direct_swap(
+            &payer.pubkey(),
+            &payer_usdc,
+            &payer_test,
+            probe_in,
+            1,
+        ))
+        .send()
+        .expect("control swap with min_out 1");
+    let actual_gross = vault1_before - token_amount(&account_data(&rpc, &pubkey(VAULT_1)));
+    let actual_recv = token_amount(&account_data(&rpc, &payer_test)) - user_before;
+    assert_eq!(
+        actual_gross, predicted_gross,
+        "reserve formula did not match the cloned pool"
+    );
+    assert_eq!(actual_recv, predicted_recv, "5% fee on the direct swap");
+    let (tight_gross, tight_recv) =
+        quote_pool_swap(&account_data(&rpc, &pubkey(POOL)), &rpc, probe_in);
+    assert!(
+        tight_recv + 1 < tight_gross,
+        "probe min-out is not strictly between post-fee and pre-fee"
+    );
+    let tight = program
+        .request()
+        .instruction(direct_swap(
+            &payer.pubkey(),
+            &payer_usdc,
+            &payer_test,
+            probe_in,
+            tight_recv + 1,
+        ))
+        .send();
+    let err = tight.expect_err("pool accepted a min-out above the post-fee amount");
+    let err_text = format!("{err:#}");
+    assert!(
+        err_text.contains("ExceededSlippage")
+            || err_text.contains("6005")
+            || err_text.contains("slippage"),
+        "min-out one above the post-fee amount failed for a different reason: {err_text}"
+    );
+
+    let withdraw_test = received / 2;
+    program
+        .request()
         .accounts(fund_nft::accounts::Withdraw {
             holder: payer.pubkey(),
             fund,
@@ -471,6 +528,61 @@ fn hex8(bytes: &[u8]) -> String {
 
 fn ceil_fee(amount: u64, bps: u64) -> u64 {
     ((amount as u128 * bps as u128 + 9_999) / 10_000) as u64
+}
+
+/// Protocol and fund fees sit at the offsets decoded from the USDC.X/TEST pool:
+/// five `u8`s after `observation_key`, then `lp_supply`, then the four fee u64s.
+fn quote_pool_swap(
+    pool: &[u8],
+    rpc: &solana_client::rpc_client::RpcClient,
+    amount_in: u64,
+) -> (u64, u64) {
+    let proto0 = u64::from_le_bytes(pool[341..349].try_into().unwrap());
+    let proto1 = u64::from_le_bytes(pool[349..357].try_into().unwrap());
+    let fund0 = u64::from_le_bytes(pool[357..365].try_into().unwrap());
+    let fund1 = u64::from_le_bytes(pool[365..373].try_into().unwrap());
+    let reserve_in = token_amount(&account_data(rpc, &pubkey(VAULT_0))) - proto0 - fund0;
+    let reserve_out = token_amount(&account_data(rpc, &pubkey(VAULT_1))) - proto1 - fund1;
+    let net = (amount_in as u128) * 997_200 / 1_000_000;
+    let gross = (reserve_out as u128 * net / (reserve_in as u128 + net)) as u64;
+    (gross, gross - ceil_fee(gross, 500))
+}
+
+fn direct_swap(
+    payer: &Pubkey,
+    user_in: &Pubkey,
+    user_out: &Pubkey,
+    amount_in: u64,
+    min_out: u64,
+) -> Instruction {
+    let mut data = Vec::with_capacity(24);
+    data.extend_from_slice(&xdex::SWAP_BASE_INPUT_DISCRIMINATOR);
+    data.extend_from_slice(&amount_in.to_le_bytes());
+    data.extend_from_slice(&min_out.to_le_bytes());
+    let meta = |key: Pubkey, signer: bool, writable: bool| AccountMeta {
+        pubkey: key,
+        is_signer: signer,
+        is_writable: writable,
+    };
+    Instruction {
+        program_id: pubkey(XDEX),
+        accounts: vec![
+            meta(*payer, true, false),
+            meta(pubkey(AUTHORITY), false, false),
+            meta(pubkey(AMM), false, false),
+            meta(pubkey(POOL), false, true),
+            meta(*user_in, false, true),
+            meta(*user_out, false, true),
+            meta(pubkey(VAULT_0), false, true),
+            meta(pubkey(VAULT_1), false, true),
+            meta(fund_nft::TOKEN_2022_PROGRAM_ID, false, false),
+            meta(fund_nft::TOKEN_2022_PROGRAM_ID, false, false),
+            meta(pubkey(USDC), false, false),
+            meta(pubkey(TEST_MINT), false, false),
+            meta(pubkey(OBS), false, true),
+        ],
+        data,
+    }
 }
 
 fn ata(owner: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {

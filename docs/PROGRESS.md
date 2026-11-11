@@ -105,3 +105,11 @@ cd keeper && npm install && npx tsc --noEmit
 ```
 
 `tsc --noEmit` exited 0 with `@anchor-lang/core` 1.2.2 and `@solana/web3.js` 1.99.0. A dry run against `https://rpc.mainnet.x1.xyz` (`npx tsx src/index.ts --dry-run`) printed `0 program accounts, 0 due targets` and did not send a transaction.
+
+## Follow-up — min-out side and the authority seed
+
+`cargo test -p fund_nft --lib raydium_authority_seed` passed. `cargo test -p fund-nft-tests -- --test-threads=1 cloned_usdc_test_pool_create_deposit_dca_withdraw` passed again, in 6.21s, with one added probe.
+
+The probe quotes 20_000 raw USDC.X from the cloned reserves, swaps with `minimum_amount_out = 1`, and checks the formula including the 5% ceiling fee. It then swaps the same size with `minimum_amount_out` one raw unit above the post-fee amount and still below the pre-fee amount. XDEX returns `ExceededSlippage` (code 6005). The pool's minimum is the amount the destination receives after the output transfer fee.
+
+The authority seed check is a host unit test. It does not change the program.
