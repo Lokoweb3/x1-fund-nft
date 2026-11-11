@@ -1,0 +1,10 @@
+[package]
+name = "fund_nft"
+version = "0.1.0"
+description = "Fund NFT: a vault that dollar-cost-averages quote tokens through XDEX"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "fund_nft"
+path = "src/lib.rs"
