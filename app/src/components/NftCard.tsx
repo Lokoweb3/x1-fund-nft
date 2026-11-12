@@ -9,7 +9,7 @@ import { formatShare, formatValue } from "../lib/format";
 import { sharePercent, sortByValue, type Valuation } from "../lib/value";
 import { resolvePicture, type PictureState } from "../lib/nft_picture";
 import { symOf, type ValuationState } from "./Holdings";
-import { CARD_ACTIONS, HELD_BY_PROGRAM_NOTE, HINT_HELD_BY_PROGRAM, type CardAction, type CardActionState } from "../lib/card_actions";
+import { CARD_ACTION_LABEL as ACTION_LABEL, CARD_ACTIONS, HELD_BY_PROGRAM_NOTE, HINT_HELD_BY_PROGRAM, type CardAction, type CardActionState } from "../lib/card_actions";
 
 /**
  * The picture for a metadata uri. Auto-fetches only X1 Inscriptions hosts;
@@ -240,8 +240,6 @@ export function NftCard({
   const { picture, allow } = usePicture(md.loaded ? md.stored?.uri : undefined, key);
   return <NftCardView stored={md.stored} picture={md.loaded ? picture : { status: "loading" }} onAllow={allow} holdings={holdings} view={view} labels={labels} actions={actions} />;
 }
-
-const ACTION_LABEL: Record<CardAction, string> = { deposit: "Deposit", withdraw: "Withdraw", native: "Withdraw XNT" };
 
 /**
  * The card's button row and the one open action form below it. Clicking the

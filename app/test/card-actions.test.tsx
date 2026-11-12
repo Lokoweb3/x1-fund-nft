@@ -8,7 +8,9 @@ import { test } from "node:test";
 import { renderToString } from "react-dom/server";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import {
+  cardActionForRun,
   cardActionStates,
+  statusOnCard,
   DEPOSIT_NOTE,
   heldByProgram,
   HELD_BY_PROGRAM_NOTE,
@@ -105,6 +107,21 @@ test("render: held by a program -> the badge, withdrawals off, no duplicate hint
   assert.match(html, /<button[^>]*disabled=""[^>]*data-testid="card-action-withdraw"/);
   assert.match(html, /<button[^>]*disabled=""[^>]*data-testid="card-action-native"/);
   assert.doesNotMatch(html, /card-action-hint/);
+});
+
+test("status placement: a run's status is on the card only while its own action is open", () => {
+  assert.equal(cardActionForRun("deposit"), "deposit");
+  assert.equal(cardActionForRun("withdraw"), "withdraw");
+  assert.equal(cardActionForRun("native withdraw"), "native");
+  for (const other of ["ensure", "metadata", "", "toString", "constructor"]) assert.equal(cardActionForRun(other), undefined);
+  assert.equal(statusOnCard("deposit", "deposit"), true);
+  assert.equal(statusOnCard("native withdraw", "native"), true);
+  assert.equal(statusOnCard("deposit", "withdraw"), false);
+  assert.equal(statusOnCard("deposit", "native"), false);
+  assert.equal(statusOnCard("withdraw", "deposit"), false);
+  assert.equal(statusOnCard("deposit", null), false);
+  assert.equal(statusOnCard("ensure", "deposit"), false);
+  assert.equal(statusOnCard("", null), false);
 });
 
 test("deposit note wording", () => {

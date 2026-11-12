@@ -8,6 +8,24 @@ import { PublicKey } from "@solana/web3.js";
 
 export type CardAction = "deposit" | "withdraw" | "native";
 export const CARD_ACTIONS: readonly CardAction[] = ["deposit", "withdraw", "native"];
+export const CARD_ACTION_LABEL: Record<CardAction, string> = { deposit: "Deposit", withdraw: "Withdraw", native: "Withdraw XNT" };
+
+/** The fund page's run() names for the card actions. */
+const RUN_TO_ACTION: Record<string, CardAction> = { deposit: "deposit", withdraw: "withdraw", "native withdraw": "native" };
+
+/** Which card action a run() name belongs to, or undefined for other actions (ensure vaults, metadata). */
+export function cardActionForRun(name: string): CardAction | undefined {
+  return Object.prototype.hasOwnProperty.call(RUN_TO_ACTION, name) ? RUN_TO_ACTION[name] : undefined;
+}
+
+/**
+ * Where a run's progress and error show: inside the card panel only when
+ * that run's own action is the open one; otherwise under Actions. Never both.
+ */
+export function statusOnCard(lastRun: string, open: CardAction | null): boolean {
+  const a = cardActionForRun(lastRun);
+  return a !== undefined && a === open;
+}
 
 export interface CardActionState {
   enabled: boolean;

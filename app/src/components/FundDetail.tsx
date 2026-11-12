@@ -18,10 +18,7 @@ import { bpsToPercent, countdown, humanInterval } from "../lib/wizard";
 import { ArtStep, type ArtResult } from "./ArtStep";
 import { HoldingsCard, useValuation, type ValuationState } from "./Holdings";
 import { NftCard, NftCardActions } from "./NftCard";
-import { cardActionStates, DEPOSIT_NOTE, heldByProgram, type CardAction } from "../lib/card_actions";
-
-/** run() names of the actions whose forms open on the NFT card; their progress and errors show there. */
-const CARD_RUNS = new Set(["deposit", "withdraw", "native withdraw"]);
+import { CARD_ACTION_LABEL, cardActionForRun, cardActionStates, DEPOSIT_NOTE, heldByProgram, statusOnCard, type CardAction } from "../lib/card_actions";
 
 /** Light polling: at most every 30 s, only while the tab is visible. */
 const POLL_MS = 30_000;
@@ -157,17 +154,24 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
   const cardStates = cardActionStates({ wallet: payer, holder: view?.nftAccount?.owner, heldByProgram: escrow });
   // A form whose button is off (wallet gone, holder changed, NFT listed) closes.
   const openAction = cardOpen && cardStates[cardOpen].enabled ? cardOpen : null;
-  const onCard = CARD_RUNS.has(lastRun);
+  // A run's status shows in its own action's panel only; a late result never lands in another action's panel.
+  const onCard = statusOnCard(lastRun, openAction);
+  const runAction = cardActionForRun(lastRun);
   const status = net && (
     <>
       {busy && <p className="muted">Building and simulating {busy}...</p>}
+      {actionError !== null && !onCard && runAction && (
+        <p className="small" data-testid="action-error-for">
+          <strong>{CARD_ACTION_LABEL[runAction]}:</strong>
+        </p>
+      )}
       {actionError !== null && <FriendlyError err={actionError} cluster={net.cluster} testId="action-error" />}
     </>
   );
 
   // A review built from the card lands below the Actions panel; bring it into view.
   useEffect(() => {
-    if (review && CARD_RUNS.has(lastRun)) document.querySelector('[data-testid="review"]')?.scrollIntoView?.({ block: "nearest" });
+    if (review && runAction) document.querySelector('[data-testid="review"]')?.scrollIntoView?.({ block: "nearest" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [review]);
 
@@ -222,7 +226,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
                           onReview={(amount) => run("native withdraw", () => reviewWithdrawNative(net, payer!, fundKey, amount))}
                         />
                       )}
-                      {openAction && onCard && status}
+                      {onCard && status}
                     </NftCardActions>
                   }
                 />
@@ -363,7 +367,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
             </button>
             <span className="small muted">Creates any missing quote/target vault account. Idempotent.</span>
           </div>
-          {!(openAction && onCard) && status}
+          {!onCard && status}
         </section>
       )}
 
