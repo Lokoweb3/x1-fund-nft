@@ -59,6 +59,9 @@ export function friendlyError(err: unknown, opts: { cluster?: string } = {}): Fr
   if (/AttachCostTooHigh|0x17a3\b|"Custom":6051/.test(raw)) {
     return { title: "Attaching the NFT metadata would cost more than the program allows (0.03 XNT), so it refused.", raw };
   }
+  if (/the RPC answered from slot \d+, older than the settlement evidence/.test(raw)) {
+    return { title: "The network node is behind, try resuming again in a few seconds.", raw };
+  }
   if (/not resuming yet/.test(raw)) {
     return {
       title: "An earlier transaction of this inscription may still land. Try Resume again in about a minute, once it has confirmed or expired.",

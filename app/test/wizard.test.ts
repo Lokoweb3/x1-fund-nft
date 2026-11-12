@@ -121,6 +121,10 @@ test("friendly errors map to actions", () => {
   assert.match(friendlyError(new Error("custom program error: 0x17a5")).title, /^Token Metadata changed your wallet account, transaction refused/);
   assert.match(friendlyError(new Error("Error Code: PayerNotWallet")).title, /ordinary wallet/);
   assert.match(friendlyError(new Error("not resuming yet: an earlier transaction may still land")).title, /about a minute/);
+  assert.equal(
+    friendlyError(new Error("the RPC answered from slot 100, older than the settlement evidence at slot 120; nothing was simulated or sent")).title,
+    "The network node is behind, try resuming again in a few seconds.",
+  );
   assert.equal(friendlyError(new Error("something odd")).title, "something odd");
 });
 
