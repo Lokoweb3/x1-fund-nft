@@ -90,9 +90,25 @@ test("decode rejects a non-Fund discriminator instead of returning garbage", asy
 
 test("cluster guard", () => {
   const base = { iUnderstandMainnet: false, rpcUrl: "http://127.0.0.1:8899" };
-  assert.equal(clusterFromGenesisHash(X1_MAINNET_GENESIS_HASH), "mainnet");
-  assert.equal(clusterFromGenesisHash(X1_TESTNET_GENESIS_HASH), "testnet");
-  assert.equal(clusterFromGenesisHash("11111111111111111111111111111111"), "localnet");
+  const other = "11111111111111111111111111111111";
+  assert.equal(clusterFromGenesisHash(X1_MAINNET_GENESIS_HASH, "https://any.example"), "mainnet");
+  assert.equal(clusterFromGenesisHash(X1_TESTNET_GENESIS_HASH, "https://any.example"), "testnet");
+  assert.equal(clusterFromGenesisHash(other, "http://127.0.0.1:8899"), "localnet");
+  assert.equal(clusterFromGenesisHash(other, "http://localhost:8899"), "localnet");
+  assert.equal(clusterFromGenesisHash(other, "https://production-provider.example"), "unknown");
+  assert.equal(clusterFromGenesisHash(other, "https://127.0.0.1.attacker.example"), "unknown");
+
+  // Unknown public chain: refused even with --cluster localnet (codex r2 finding).
+  assert.throws(
+    () =>
+      assertSendAllowed({
+        clusterFlag: "localnet",
+        genesisHash: other,
+        iUnderstandMainnet: false,
+        rpcUrl: "https://production-provider.example",
+      }),
+    /not X1 mainnet or testnet/,
+  );
 
   // Mismatched genesis hash is rejected.
   assert.throws(
@@ -122,7 +138,7 @@ test("cluster guard", () => {
         iUnderstandMainnet: false,
         rpcUrl: "https://rpc.mainnet.x1.xyz",
       }),
-    /looks like X1 mainnet/,
+    /not X1 mainnet or testnet|looks like X1 mainnet/,
   );
   // Allowed cases.
   assert.equal(

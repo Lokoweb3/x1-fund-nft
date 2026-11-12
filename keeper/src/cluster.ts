@@ -12,16 +12,33 @@ export const X1_TESTNET_GENESIS_HASH = "C7ucgdDEhxLTpXHhWSZxavSVmaNTUJWwT5iTdeav
 
 export type Cluster = "mainnet" | "testnet" | "localnet";
 export const CLUSTERS: readonly Cluster[] = ["mainnet", "testnet", "localnet"];
+/** A chain the keeper does not recognize. Sends to it are always refused. */
+export type DetectedCluster = Cluster | "unknown";
 
 export function isCluster(value: string): value is Cluster {
   return (CLUSTERS as readonly string[]).includes(value);
 }
 
-/** localnet is any genesis hash that is neither X1 mainnet nor X1 testnet. */
-export function clusterFromGenesisHash(genesisHash: string): Cluster {
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+
+export function isLoopbackUrl(rpcUrl: string): boolean {
+  try {
+    return LOOPBACK_HOSTS.has(new URL(rpcUrl).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * X1 mainnet and testnet are recognized by genesis hash. Any other hash is
+ * localnet only when the RPC is on a loopback address; otherwise it is an
+ * unknown chain (fail closed), so a mistaken public RPC is never treated as a
+ * disposable local validator.
+ */
+export function clusterFromGenesisHash(genesisHash: string, rpcUrl: string): DetectedCluster {
   if (genesisHash === X1_MAINNET_GENESIS_HASH) return "mainnet";
   if (genesisHash === X1_TESTNET_GENESIS_HASH) return "testnet";
-  return "localnet";
+  return isLoopbackUrl(rpcUrl) ? "localnet" : "unknown";
 }
 
 export function isMainnetUrl(rpcUrl: string): boolean {
@@ -38,7 +55,12 @@ export interface SendGuardInput {
 
 /** Throws unless a send to this RPC is allowed. Returns the detected cluster. */
 export function assertSendAllowed(input: SendGuardInput): Cluster {
-  const actual = clusterFromGenesisHash(input.genesisHash);
+  const actual = clusterFromGenesisHash(input.genesisHash, input.rpcUrl);
+  if (actual === "unknown") {
+    throw new Error(
+      `refusing to send: genesis ${input.genesisHash} is not X1 mainnet or testnet, and ${input.rpcUrl} is not a loopback local validator`,
+    );
+  }
   if (!input.clusterFlag) {
     throw new Error(
       `sending requires --cluster <${CLUSTERS.join("|")}>; the RPC reports ${actual} (genesis ${input.genesisHash})`,

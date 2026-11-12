@@ -82,11 +82,20 @@ pub fn check_mint_bytes(owner: &Pubkey, data: &[u8]) -> core::result::Result<(),
     if data.len() < TLV_START || data[ACCOUNT_TYPE_OFFSET] != ACCOUNT_TYPE_MINT {
         return Err(MintPolicyError::Malformed);
     }
+    // Mirrors spl-token-2022-interface `get_tlv_data_info`: a single trailing
+    // byte is realloc padding, a zero type ends the entries, and a non-zero
+    // type without its two-byte length is malformed.
     let mut offset = TLV_START;
-    while offset + 4 <= data.len() {
+    while offset < data.len() {
+        if data.len() - offset < 2 {
+            break;
+        }
         let typ = u16::from_le_bytes([data[offset], data[offset + 1]]);
         if typ == EXT_UNINITIALIZED {
             break;
+        }
+        if data.len() - offset < 4 {
+            return Err(MintPolicyError::Malformed);
         }
         let len = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
         let next = offset + 4 + len;
@@ -234,6 +243,24 @@ mod tests {
             check_mint_bytes(&TOKEN_2022_PROGRAM_ID, &account),
             Err(MintPolicyError::Malformed)
         );
+        // A non-zero type header with no length after it (codex r2 nit):
+        // two or three trailing bytes naming PermanentDelegate.
+        for tail in [&[12u8, 0][..], &[12u8, 0, 0][..]] {
+            let mut data = mint_2022(&[(EXT_METADATA_POINTER, 64)]);
+            data.extend_from_slice(tail);
+            assert_eq!(
+                check_mint_bytes(&TOKEN_2022_PROGRAM_ID, &data),
+                Err(MintPolicyError::Malformed),
+                "{tail:?}"
+            );
+        }
+        // One trailing byte is realloc padding, and a zero type ends the entries.
+        let mut padded = mint_2022(&[(EXT_METADATA_POINTER, 64)]);
+        padded.push(0);
+        assert_eq!(check_mint_bytes(&TOKEN_2022_PROGRAM_ID, &padded), Ok(()));
+        let mut zero_tail = mint_2022(&[(EXT_METADATA_POINTER, 64)]);
+        zero_tail.extend_from_slice(&[0, 0, 0]);
+        assert_eq!(check_mint_bytes(&TOKEN_2022_PROGRAM_ID, &zero_tail), Ok(()));
         // A TLV length that runs off the end.
         let mut truncated = mint_2022(&[(EXT_METADATA_POINTER, 64)]);
         truncated.truncate(truncated.len() - 1);

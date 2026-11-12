@@ -130,7 +130,7 @@ async function main(): Promise<void> {
 
   // Identify the chain from its genesis hash before any keypair is loaded.
   const genesisHash = await connection.getGenesisHash();
-  const cluster = clusterFromGenesisHash(genesisHash);
+  const cluster = clusterFromGenesisHash(genesisHash, rpcUrl);
   if (!options.dryRun) {
     assertSendAllowed({
       clusterFlag: options.cluster,
