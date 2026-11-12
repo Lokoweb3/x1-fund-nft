@@ -84,4 +84,24 @@ pub enum FundError {
     BadMintAccount,
     #[msg("Remaining accounts must be the non-cash target mints, in target order")]
     TargetMintAccounts,
+    #[msg("A target mint cannot be the fund NFT mint")]
+    TargetIsNftMint,
+    #[msg("The metadata program is not the allowlisted Token Metadata program")]
+    BadMetadataProgram,
+    #[msg("Metadata name is longer than 32 bytes")]
+    MetadataNameTooLong,
+    #[msg("Metadata symbol is longer than 10 bytes")]
+    MetadataSymbolTooLong,
+    #[msg("Metadata URI is longer than 200 bytes")]
+    MetadataUriTooLong,
+    #[msg("Metadata fields cannot contain NUL bytes")]
+    MetadataNul,
+    #[msg("The fund NFT already has metadata")]
+    MetadataExists,
+    #[msg("The fund PDA is not the NFT mint authority, or the NFT supply is not 1")]
+    NftMintAuthority,
+    #[msg("The metadata account does not belong to this fund NFT")]
+    BadMetadata,
+    #[msg("Nothing to update")]
+    NothingToUpdate,
 }

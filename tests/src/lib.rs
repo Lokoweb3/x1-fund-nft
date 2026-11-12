@@ -57,6 +57,9 @@ const AUTHORITY: &str = "9Dpjw2pB5kXJr6ZTHiqzEMfJPic3om9jgNacnwpLCoaU";
 const CLASSIC_TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const ATA_PROGRAM: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+/// Metaplex Token Metadata. Upgradeable on X1 mainnet (BPFLoaderUpgradeab1e,
+/// authority X1TMEC99KMa4MGEKfcrSJ6HZTiwvPVyrwQczZjuCoLV, checked 2026-11-12).
+const METAPLEX: &str = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
 /// SIMD-0127, "Enable syscall for fetching Sysvar bytes". X1 mainnet's feature
 /// account reports it inactive, yet X1's own Tokenkeg (upgradeable, last
 /// deployed in slot 85798112) imports `sol_get_sysvar` and its transactions
@@ -159,6 +162,7 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
         .arg(TOKEN_2022)
         .arg("--clone")
         .arg(ATA_PROGRAM);
+    cmd.arg("--clone-upgradeable-program").arg(METAPLEX);
     cmd.arg("--clone-upgradeable-program")
         .arg(XDEX)
         .arg("--account")
@@ -317,6 +321,40 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
         "missing target mint account",
     );
 
+    // A target cannot be the NFT mint itself (its key is the creator's choice).
+    let self_nft = Keypair::new();
+    let (self_fund, _) =
+        Pubkey::find_program_address(&[b"fund", self_nft.pubkey().as_ref()], &PROGRAM_ID);
+    let self_target = program
+        .request()
+        .accounts(fund_nft::accounts::CreateFund {
+            creator: payer.pubkey(),
+            fund: self_fund,
+            nft_mint: self_nft.pubkey(),
+            creator_nft_account: ata(&payer.pubkey(), &self_nft.pubkey(), &classic),
+            quote_mint: usdc,
+            token_program: classic,
+            associated_token_program: spl_associated_token_account_interface::program::ID,
+            system_program: System::id(),
+        })
+        .accounts(AccountMeta::new_readonly(self_nft.pubkey(), false))
+        .args(fund_nft::instruction::CreateFund {
+            params: fund_params(usdc, self_nft.pubkey(), window, 500),
+        })
+        .signer(&self_nft)
+        .send();
+    expect_fund_error(
+        self_target,
+        fund_nft::FundError::TargetIsNftMint,
+        "target mint equal to the NFT mint",
+    );
+
+    let stranger = Keypair::new();
+    let drop_sig = rpc
+        .request_airdrop(&stranger.pubkey(), 1_000_000_000)
+        .unwrap();
+    rpc.poll_for_signature(&drop_sig).unwrap();
+
     let (fund, _) =
         Pubkey::find_program_address(&[b"fund", nft_mint.pubkey().as_ref()], &PROGRAM_ID);
     let creator_nft = ata(&payer.pubkey(), &nft_mint.pubkey(), &classic);
@@ -341,14 +379,44 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
         .expect("create_fund");
 
     let nft_data = account_data(&rpc, &nft_mint.pubkey());
+    // Until attach_metadata, the fund PDA keeps the mint authority.
     assert_eq!(
-        &nft_data[0..4],
-        &0u32.to_le_bytes(),
-        "mint authority removed"
+        mint_authority(&nft_data),
+        Some(fund),
+        "mint authority is the fund"
+    );
+    assert_eq!(
+        freeze_authority(&nft_data),
+        Some(fund),
+        "freeze authority is the fund"
     );
     assert_eq!(nft_data[44], 0, "nft decimals");
-    assert_eq!(u64::from_le_bytes(nft_data[36..44].try_into().unwrap()), 1);
+    assert_eq!(mint_supply(&nft_data), 1);
     assert_eq!(token_amount(&account_data(&rpc, &creator_nft)), 1);
+    // Nobody but the fund PDA can mint, and only this program signs for it.
+    let early_mint = program
+        .request()
+        .instruction(nft_mint_to(
+            &nft_mint.pubkey(),
+            &creator_nft,
+            &payer.pubkey(),
+        ))
+        .send();
+    assert!(
+        early_mint.is_err(),
+        "payer minted a second NFT before attach"
+    );
+    assert_eq!(mint_supply(&account_data(&rpc, &nft_mint.pubkey())), 1);
+
+    check_metadata_flow(
+        &program,
+        &rpc,
+        &payer,
+        &stranger,
+        fund,
+        nft_mint.pubkey(),
+        creator_nft,
+    );
 
     let quote_vault = ata(&fund, &usdc, &token_2022);
     let target_vault = ata(&fund, &test_mint, &token_2022);
@@ -564,11 +632,6 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
     assert_eq!(end.targets[1].budget, 333_334);
     assert_eq!(token_amount(&account_data(&rpc, &quote_vault)), 500_000);
 
-    let stranger = Keypair::new();
-    let drop_sig = rpc
-        .request_airdrop(&stranger.pubkey(), 1_000_000_000)
-        .unwrap();
-    rpc.poll_for_signature(&drop_sig).unwrap();
     let stranger_client = Client::new_with_options(
         Cluster::Custom(LOCAL.into(), "ws://127.0.0.1:19000".into()),
         &stranger,
@@ -599,6 +662,425 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
         .send();
     assert!(rejected.is_err(), "a non-holder must not withdraw");
     drop(validator);
+}
+
+type ProgramClient<'a> = anchor_client::Program<&'a Keypair>;
+
+fn attach_accounts(
+    holder: Pubkey,
+    fund: Pubkey,
+    nft_mint: Pubkey,
+    nft_account: Pubkey,
+    metadata_program: Pubkey,
+) -> fund_nft::accounts::AttachMetadata {
+    fund_nft::accounts::AttachMetadata {
+        holder,
+        fund,
+        nft_mint,
+        nft_account,
+        metadata: fund_nft::metaplex::metadata_address(&nft_mint),
+        master_edition: fund_nft::metaplex::edition_address(&nft_mint),
+        nft_token_program: fund_nft::NFT_TOKEN_PROGRAM_ID,
+        metadata_program,
+        system_program: System::id(),
+        rent: anchor_lang::prelude::rent::ID,
+    }
+}
+
+fn update_accounts(
+    holder: Pubkey,
+    fund: Pubkey,
+    nft_mint: Pubkey,
+    nft_account: Pubkey,
+    metadata_program: Pubkey,
+) -> fund_nft::accounts::UpdateMetadata {
+    fund_nft::accounts::UpdateMetadata {
+        holder,
+        fund,
+        nft_mint,
+        nft_account,
+        metadata: fund_nft::metaplex::metadata_address(&nft_mint),
+        nft_token_program: fund_nft::NFT_TOKEN_PROGRAM_ID,
+        metadata_program,
+    }
+}
+
+fn read_metadata(
+    rpc: &solana_client::rpc_client::RpcClient,
+    nft_mint: &Pubkey,
+) -> anchor_spl::metadata::mpl_token_metadata::accounts::Metadata {
+    let address = fund_nft::metaplex::metadata_address(nft_mint);
+    let account = rpc.get_account(&address).expect("metadata account");
+    assert_eq!(account.owner, pubkey(METAPLEX), "metadata owner");
+    anchor_spl::metadata::mpl_token_metadata::accounts::Metadata::safe_deserialize(&account.data)
+        .expect("decode metadata")
+}
+
+/// create -> attach -> contents -> holder update -> non-holder update
+/// rejected -> attach twice rejected -> master edition -> mint authority is
+/// the edition -> minting fails.
+fn check_metadata_flow(
+    program: &ProgramClient,
+    rpc: &solana_client::rpc_client::RpcClient,
+    payer: &Keypair,
+    stranger: &Keypair,
+    fund: Pubkey,
+    nft_mint: Pubkey,
+    creator_nft: Pubkey,
+) {
+    let metaplex = pubkey(METAPLEX);
+    let holder = payer.pubkey();
+    let name = "X1 Fund NFT".to_string();
+    let symbol = "XFUND".to_string();
+    let uri = "https://example.invalid/fund-nft/1.json".to_string();
+
+    // Bounds are checked before any CPI.
+    let long_name = program
+        .request()
+        .accounts(attach_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+            metaplex,
+        ))
+        .args(fund_nft::instruction::AttachMetadata {
+            name: "n".repeat(33),
+            symbol: symbol.clone(),
+            uri: uri.clone(),
+        })
+        .send();
+    expect_fund_error(
+        long_name,
+        fund_nft::FundError::MetadataNameTooLong,
+        "33-byte name",
+    );
+    let long_uri = program
+        .request()
+        .accounts(attach_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+            metaplex,
+        ))
+        .args(fund_nft::instruction::AttachMetadata {
+            name: name.clone(),
+            symbol: symbol.clone(),
+            uri: "u".repeat(201),
+        })
+        .send();
+    expect_fund_error(
+        long_uri,
+        fund_nft::FundError::MetadataUriTooLong,
+        "201-byte uri",
+    );
+    // Only the allowlisted Token Metadata program.
+    let wrong_program = program
+        .request()
+        .accounts(attach_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+            fund_nft::TOKEN_2022_PROGRAM_ID,
+        ))
+        .args(fund_nft::instruction::AttachMetadata {
+            name: name.clone(),
+            symbol: symbol.clone(),
+            uri: uri.clone(),
+        })
+        .send();
+    expect_fund_error(
+        wrong_program,
+        fund_nft::FundError::BadMetadataProgram,
+        "attach with a non-Metaplex program",
+    );
+    // A non-holder cannot attach.
+    let stranger_attach = program
+        .request()
+        .accounts(attach_accounts(
+            stranger.pubkey(),
+            fund,
+            nft_mint,
+            creator_nft,
+            metaplex,
+        ))
+        .args(fund_nft::instruction::AttachMetadata {
+            name: name.clone(),
+            symbol: symbol.clone(),
+            uri: uri.clone(),
+        })
+        .signer(stranger)
+        .send();
+    expect_fund_error(
+        stranger_attach,
+        fund_nft::FundError::BadNft,
+        "non-holder attach",
+    );
+
+    let attach_sig = program
+        .request()
+        .instruction(compute_limit(400_000))
+        .accounts(attach_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+            metaplex,
+        ))
+        .args(fund_nft::instruction::AttachMetadata {
+            name: name.clone(),
+            symbol: symbol.clone(),
+            uri: uri.clone(),
+        })
+        .send()
+        .unwrap_or_else(|err| panic!("attach_metadata failed: {err:#}"));
+    println!("attach_metadata: {attach_sig}");
+
+    let md = read_metadata(rpc, &nft_mint);
+    assert_eq!(
+        md.update_authority, fund,
+        "update authority is the fund PDA"
+    );
+    assert_eq!(md.mint, nft_mint);
+    assert_eq!(fund_nft::metaplex::trim_nul(&md.name), name);
+    assert_eq!(fund_nft::metaplex::trim_nul(&md.symbol), symbol);
+    assert_eq!(fund_nft::metaplex::trim_nul(&md.uri), uri);
+    assert_eq!(md.seller_fee_basis_points, 0);
+    assert!(md.creators.is_none(), "no creators");
+    assert!(md.collection.is_none() && md.uses.is_none());
+    assert!(md.is_mutable, "metadata stays mutable");
+    assert!(!md.primary_sale_happened);
+
+    let edition = fund_nft::metaplex::edition_address(&nft_mint);
+    let edition_account = rpc.get_account(&edition).expect("master edition account");
+    assert_eq!(edition_account.owner, metaplex, "edition owner");
+    let master =
+        anchor_spl::metadata::mpl_token_metadata::accounts::MasterEdition::safe_deserialize(
+            &edition_account.data,
+        )
+        .expect("decode master edition");
+    assert_eq!(master.max_supply, Some(0), "no prints");
+    assert_eq!(master.supply, 0);
+
+    let mint_data = account_data(rpc, &nft_mint);
+    assert_eq!(
+        mint_authority(&mint_data),
+        Some(edition),
+        "mint authority is the edition"
+    );
+    assert_eq!(
+        freeze_authority(&mint_data),
+        Some(edition),
+        "freeze authority is the edition"
+    );
+    assert_eq!(mint_supply(&mint_data), 1);
+    let late_mint = program
+        .request()
+        .instruction(nft_mint_to(&nft_mint, &creator_nft, &holder))
+        .send();
+    assert!(
+        late_mint.is_err(),
+        "minted after the master edition took the authority"
+    );
+    let fund_mint = program
+        .request()
+        .instruction(nft_mint_to(&nft_mint, &creator_nft, &fund))
+        .send();
+    assert!(
+        fund_mint.is_err(),
+        "a mint naming the fund PDA cannot be signed"
+    );
+    assert_eq!(mint_supply(&account_data(rpc, &nft_mint)), 1);
+
+    // Attach twice is rejected.
+    let again = program
+        .request()
+        .instruction(compute_limit(400_000))
+        .accounts(attach_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+            metaplex,
+        ))
+        .args(fund_nft::instruction::AttachMetadata {
+            name: name.clone(),
+            symbol: symbol.clone(),
+            uri: uri.clone(),
+        })
+        .send();
+    expect_fund_error(again, fund_nft::FundError::MetadataExists, "second attach");
+
+    // Holder update: only the URI changes; name and symbol are kept.
+    let new_uri = "https://example.invalid/fund-nft/1-v2.json".to_string();
+    program
+        .request()
+        .instruction(compute_limit(200_000))
+        .accounts(update_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+            metaplex,
+        ))
+        .args(fund_nft::instruction::UpdateMetadata {
+            name: None,
+            symbol: None,
+            uri: Some(new_uri.clone()),
+        })
+        .send()
+        .unwrap_or_else(|err| panic!("holder update_metadata failed: {err:#}"));
+    let md = read_metadata(rpc, &nft_mint);
+    assert_eq!(fund_nft::metaplex::trim_nul(&md.name), name);
+    assert_eq!(fund_nft::metaplex::trim_nul(&md.symbol), symbol);
+    assert_eq!(fund_nft::metaplex::trim_nul(&md.uri), new_uri);
+    assert_eq!(md.update_authority, fund);
+    assert!(md.is_mutable);
+
+    let new_name = "Renamed fund".to_string();
+    program
+        .request()
+        .instruction(compute_limit(200_000))
+        .accounts(update_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+            metaplex,
+        ))
+        .args(fund_nft::instruction::UpdateMetadata {
+            name: Some(new_name.clone()),
+            symbol: None,
+            uri: None,
+        })
+        .send()
+        .expect("holder rename");
+    let md = read_metadata(rpc, &nft_mint);
+    assert_eq!(fund_nft::metaplex::trim_nul(&md.name), new_name);
+    assert_eq!(fund_nft::metaplex::trim_nul(&md.uri), new_uri);
+
+    let empty = program
+        .request()
+        .accounts(update_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+            metaplex,
+        ))
+        .args(fund_nft::instruction::UpdateMetadata {
+            name: None,
+            symbol: None,
+            uri: None,
+        })
+        .send();
+    expect_fund_error(empty, fund_nft::FundError::NothingToUpdate, "empty update");
+    let long_symbol = program
+        .request()
+        .accounts(update_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+            metaplex,
+        ))
+        .args(fund_nft::instruction::UpdateMetadata {
+            name: None,
+            symbol: Some("s".repeat(11)),
+            uri: None,
+        })
+        .send();
+    expect_fund_error(
+        long_symbol,
+        fund_nft::FundError::MetadataSymbolTooLong,
+        "11-byte symbol",
+    );
+
+    // A non-holder cannot update, with the holder's NFT account or without one.
+    let stranger_update = program
+        .request()
+        .accounts(update_accounts(
+            stranger.pubkey(),
+            fund,
+            nft_mint,
+            creator_nft,
+            metaplex,
+        ))
+        .args(fund_nft::instruction::UpdateMetadata {
+            name: None,
+            symbol: None,
+            uri: Some("https://example.invalid/stolen.json".into()),
+        })
+        .signer(stranger)
+        .send();
+    expect_fund_error(
+        stranger_update,
+        fund_nft::FundError::BadNft,
+        "non-holder update",
+    );
+    // Only the allowlisted Token Metadata program is called.
+    let wrong_program = program
+        .request()
+        .accounts(update_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+            fund_nft::TOKEN_2022_PROGRAM_ID,
+        ))
+        .args(fund_nft::instruction::UpdateMetadata {
+            name: None,
+            symbol: None,
+            uri: Some("https://example.invalid/x.json".into()),
+        })
+        .send();
+    expect_fund_error(
+        wrong_program,
+        fund_nft::FundError::BadMetadataProgram,
+        "update with a non-Metaplex program",
+    );
+    assert_eq!(
+        fund_nft::metaplex::trim_nul(&read_metadata(rpc, &nft_mint).uri),
+        new_uri
+    );
+}
+
+/// `mint_to` of one NFT unit signed by `authority` (which must sign the
+/// transaction; a PDA cannot, so naming the fund PDA always fails to sign).
+fn nft_mint_to(mint: &Pubkey, destination: &Pubkey, authority: &Pubkey) -> Instruction {
+    to_ix(
+        spl_token_2022_interface::instruction::mint_to(
+            &fund_nft::NFT_TOKEN_PROGRAM_ID,
+            mint,
+            destination,
+            authority,
+            &[],
+            1,
+        )
+        .expect("mint_to"),
+    )
+}
+
+fn mint_authority(mint: &[u8]) -> Option<Pubkey> {
+    match u32::from_le_bytes(mint[0..4].try_into().unwrap()) {
+        0 => None,
+        1 => Some(Pubkey::new_from_array(mint[4..36].try_into().unwrap())),
+        tag => panic!("bad COption tag {tag}"),
+    }
+}
+
+fn freeze_authority(mint: &[u8]) -> Option<Pubkey> {
+    match u32::from_le_bytes(mint[46..50].try_into().unwrap()) {
+        0 => None,
+        1 => Some(Pubkey::new_from_array(mint[50..82].try_into().unwrap())),
+        tag => panic!("bad COption tag {tag}"),
+    }
+}
+
+fn mint_supply(mint: &[u8]) -> u64 {
+    u64::from_le_bytes(mint[36..44].try_into().unwrap())
 }
 
 /// Legal windows (900..=86_400) tried in order, shortest first.
@@ -911,7 +1393,8 @@ fn imports_symbol(elf: &[u8], name: &str) -> bool {
     let mut needle = vec![0u8];
     needle.extend_from_slice(name.as_bytes());
     needle.push(0);
-    elf.windows(needle.len()).any(|window| window == needle.as_slice())
+    elf.windows(needle.len())
+        .any(|window| window == needle.as_slice())
 }
 
 fn solana_bin(name: &str) -> PathBuf {

@@ -4,6 +4,7 @@ use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, Tran
 
 use crate::accounting::{self, AccountingError};
 use crate::errors::FundError;
+use crate::holder::require_holder;
 use crate::state::Fund;
 
 #[derive(Accounts)]
@@ -26,19 +27,13 @@ pub fn handle_withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
     require!(amount > 0, FundError::ZeroAmount);
     let fund_key = ctx.accounts.fund.key();
     let quote_mint = ctx.accounts.fund.quote_mint;
-    require!(
-        ctx.accounts.nft_mint.key() == ctx.accounts.fund.nft_mint
-            && ctx.accounts.nft_mint.decimals == 0,
-        FundError::BadNft
-    );
-    require!(
-        ctx.accounts.nft_account.mint == ctx.accounts.fund.nft_mint
-            && ctx.accounts.nft_account.owner == ctx.accounts.holder.key()
-            && ctx.accounts.nft_account.amount == 1
-            && ctx.accounts.nft_mint.to_account_info().owner
-                == &ctx.accounts.nft_token_program.key(),
-        FundError::BadNft
-    );
+    require_holder(
+        &ctx.accounts.fund,
+        &ctx.accounts.holder.key(),
+        &ctx.accounts.nft_mint,
+        &ctx.accounts.nft_account,
+        &ctx.accounts.nft_token_program.key(),
+    )?;
     require!(
         ctx.accounts.mint.to_account_info().owner == &ctx.accounts.token_program.key(),
         FundError::BadTokenProgram

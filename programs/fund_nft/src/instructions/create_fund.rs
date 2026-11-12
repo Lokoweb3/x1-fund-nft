@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token_interface::{self, Mint, SetAuthority, TokenAccount, TokenInterface};
+use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface};
 
 use crate::errors::FundError;
 use crate::mint_policy::require_allowed_mint;
@@ -29,6 +29,11 @@ pub struct CreateFund<'info> {
         payer = creator,
         mint::decimals = 0,
         mint::authority = fund,
+        // Token Metadata refuses a master edition for a mint with no freeze
+        // authority ("Cannot create NFT with no Freeze Authority"), and moves
+        // it to the edition PDA with the mint authority. This program never
+        // signs a freeze.
+        mint::freeze_authority = fund,
         mint::token_program = token_program,
     )]
     pub nft_mint: InterfaceAccount<'info, Mint>,
@@ -52,12 +57,19 @@ pub fn handle_create_fund(ctx: Context<CreateFund>, params: CreateFundParams) ->
     let nft_mint = ctx.accounts.nft_mint.key();
     require!(quote_mint != nft_mint, FundError::QuoteMintMismatch);
     validate_create(&quote_mint, &params)?;
+    // The fund PDA stays the NFT mint and freeze authority until
+    // `attach_metadata`.
+    // A target with the NFT mint would let a CPI signed by that PDA see the
+    // NFT mint, so it is refused. The mint key is chosen by the creator, so
+    // it can be known before the targets are.
+    require!(
+        params.targets.iter().all(|target| target.mint != nft_mint),
+        FundError::TargetIsNftMint
+    );
     require_allowed_mint(&ctx.accounts.quote_mint.to_account_info())?;
     let mut mint_accounts = ctx.remaining_accounts.iter();
     for target in params.targets.iter().filter(|t| t.mint != quote_mint) {
-        let account = mint_accounts
-            .next()
-            .ok_or(FundError::TargetMintAccounts)?;
+        let account = mint_accounts.next().ok_or(FundError::TargetMintAccounts)?;
         require!(account.key() == target.mint, FundError::TargetMintAccounts);
         require_allowed_mint(account)?;
     }
@@ -112,17 +124,9 @@ pub fn handle_create_fund(ctx: Context<CreateFund>, params: CreateFundParams) ->
         ],
         &[signer],
     )?;
-    token_interface::set_authority(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.key(),
-            SetAuthority {
-                current_authority: ctx.accounts.fund.to_account_info(),
-                account_or_mint: ctx.accounts.nft_mint.to_account_info(),
-            },
-            &[signer],
-        ),
-        anchor_spl::token_interface::spl_token_2022::instruction::AuthorityType::MintTokens,
-        None,
-    )?;
+    // The fund PDA keeps the mint authority. `attach_metadata` uses it to
+    // sign Token Metadata's create instructions, and the master edition then
+    // takes it over with max supply 0. This program never signs another
+    // `mint_to`.
     Ok(())
 }
