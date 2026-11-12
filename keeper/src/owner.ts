@@ -10,6 +10,7 @@ import {
   ComputeBudgetProgram,
   Keypair,
   PublicKey,
+  SendTransactionError,
   SystemProgram,
   TransactionInstruction,
   TransactionMessage,
@@ -624,4 +625,162 @@ export function transferFeeFor(config: TransferFeeConfig | undefined, amount: bi
   if (fee.basisPoints === 0 || amount === 0n) return 0n;
   const raw = (amount * BigInt(fee.basisPoints) + 9_999n) / 10_000n;
   return raw < fee.maximumFee ? raw : fee.maximumFee;
+}
+
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/** Base58 encoding, used to name a transaction signature before it is submitted. */
+export function base58(bytes: Uint8Array): string {
+  let n = 0n;
+  for (const b of bytes) n = (n << 8n) | BigInt(b);
+  let out = "";
+  while (n > 0n) {
+    out = BASE58_ALPHABET[Number(n % 58n)] + out;
+    n /= 58n;
+  }
+  for (const b of bytes) {
+    if (b !== 0) break;
+    out = "1" + out;
+  }
+  return out;
+}
+
+/** The fee-payer signature of a signed transaction, which is its transaction id. */
+export function signatureOf(tx: VersionedTransaction): string {
+  return base58(tx.signatures[0]);
+}
+
+/**
+ * Classify a `sendRawTransaction` exception. Only a JSON-RPC error response
+ * (web3.js `SendTransactionError`, e.g. a failed preflight) proves the node
+ * refused the transaction. Any other exception (network failure, timeout,
+ * lost response) may have happened after the node accepted and forwarded it,
+ * so its status is unknown and the owner must check the signature before
+ * retrying.
+ */
+export function classifySendError(err: unknown): Exclude<FailedTxState, "failed"> {
+  return err instanceof SendTransactionError ? "not sent" : "unknown";
+}
+
+/** Single-quote a value for a POSIX shell. */
+export function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_./:=@%+,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Copyable ensure-vaults command. The keypair path is a quoted placeholder;
+ * the CLI never prints key material or the KEYPAIR path it was given.
+ */
+export function ensureVaultsCommandLine(input: {
+  fund: PublicKey;
+  payer: PublicKey;
+  rpcUrl: string;
+  send: boolean;
+  cluster: Cluster | undefined;
+  iUnderstandMainnet: boolean;
+}): string {
+  const parts = [
+    "npx tsx src/cli.ts ensure-vaults",
+    `--fund ${input.fund.toBase58()}`,
+    `--payer ${input.payer.toBase58()}`,
+    `--rpc ${shellQuote(input.rpcUrl)}`,
+  ];
+  if (input.send) {
+    parts.push("--send");
+    if (input.cluster) parts.push(`--cluster ${input.cluster}`);
+    if (input.iUnderstandMainnet) parts.push("--i-understand-mainnet");
+  }
+  const prefix = input.send ? "KEYPAIR='REPLACE_WITH_THE_SAME_KEYPAIR_PATH' " : "";
+  return prefix + parts.join(" ");
+}
+
+/** The RPC calls the send phase needs; `Connection` satisfies it. */
+export interface SendConnection {
+  getLatestBlockhash(commitment: "confirmed"): Promise<{ blockhash: string; lastValidBlockHeight: number }>;
+  sendRawTransaction(raw: Buffer | Uint8Array, opts: { skipPreflight: boolean }): Promise<string>;
+  confirmTransaction(
+    strategy: { signature: string; blockhash: string; lastValidBlockHeight: number },
+    commitment: "confirmed",
+  ): Promise<{ value: { err: unknown } }>;
+}
+
+export function compileTx(payer: PublicKey, tx: PlannedTx, blockhash: string): VersionedTransaction {
+  const message = new TransactionMessage({
+    payerKey: payer,
+    recentBlockhash: blockhash,
+    instructions: tx.instructions,
+  }).compileToLegacyMessage();
+  return new VersionedTransaction(message);
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Send an already-simulated plan in order. Every exit path after the first
+ * confirmed transaction goes through `partialFailureMessage`, so the owner
+ * always gets the confirmed signatures, the fund PDA, and the recovery step.
+ *
+ * Stage 1 (blockhash, compile, sign) happens before anything leaves this
+ * process, so a failure there is "not sent". Stage 2 (submission) is "not
+ * sent" only for a JSON-RPC error response; any other exception is
+ * "unknown", with the signature to check before retrying.
+ */
+export async function sendPlan(input: {
+  connection: SendConnection;
+  plan: Plan;
+  payer: PublicKey;
+  signers: Keypair[];
+  rpcUrl: string;
+  log?: (line: string) => void;
+}): Promise<TxOutcome[]> {
+  const { connection, plan, payer, signers, rpcUrl } = input;
+  const log = input.log ?? ((line: string) => console.log(line));
+  const total = plan.txs.length;
+  const done: TxOutcome[] = [];
+  const fail = (i: number, what: string, state: FailedTxState) =>
+    new Error(partialFailureMessage(plan, done, i, what, state));
+  for (const [i, tx] of plan.txs.entries()) {
+    let blockhash: string;
+    let lastValidBlockHeight: number;
+    let vtx: VersionedTransaction;
+    let signature: string;
+    try {
+      ({ blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed"));
+      vtx = compileTx(payer, tx, blockhash);
+      vtx.sign([...signers, ...tx.extraSigners]);
+      signature = signatureOf(vtx);
+    } catch (err) {
+      throw fail(i, `could not be prepared (blockhash/compile/sign): ${errText(err)}`, "not sent");
+    }
+    try {
+      await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false });
+    } catch (err) {
+      const state = classifySendError(err);
+      const what =
+        state === "not sent"
+          ? `${signature} was refused by the RPC before landing: ${errText(err)}`
+          : `${signature} may have been submitted; its status is unknown: ${errText(err)}. ` +
+            `Check it with: solana confirm -v ${signature} --url ${shellQuote(rpcUrl)} before retrying.`;
+      throw fail(i, what, state);
+    }
+    let result: { value: { err: unknown } };
+    try {
+      result = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+    } catch (err) {
+      throw fail(
+        i,
+        `${signature} was sent but its status is unknown: ${errText(err)}. ` +
+          `Check it with: solana confirm -v ${signature} --url ${shellQuote(rpcUrl)} before retrying.`,
+        "unknown",
+      );
+    }
+    if (result.value.err) {
+      throw fail(i, `${signature} landed and failed: ${JSON.stringify(result.value.err)}`, "failed");
+    }
+    done.push({ label: tx.label, signature });
+    log(`  tx ${i + 1}/${total} (${tx.label}) sent and confirmed: ${signature}`);
+  }
+  return done;
 }

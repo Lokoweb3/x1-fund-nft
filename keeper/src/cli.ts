@@ -29,6 +29,8 @@ import { readPool, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "./pool.js";
 import {
   assertPlanFits,
   associatedTokenAddress,
+  ensureVaultsCommandLine,
+  sendPlan,
   checkPool,
   computeBudget,
   createAtaIdempotentIx,
@@ -149,13 +151,14 @@ async function main(): Promise<void> {
 
 /** Shell command line for ensure-vaults with the same RPC and send flags. */
 function ensureVaultsCommand(ctx: Ctx, fund: PublicKey): string {
-  const parts = ["npx tsx src/cli.ts ensure-vaults", `--fund ${fund.toBase58()}`, `--payer ${ctx.payer.toBase58()}`];
-  if (ctx.options.rpcUrl) parts.push(`--rpc ${ctx.options.rpcUrl}`);
-  if (ctx.send) {
-    parts.push("--send", `--cluster ${ctx.options.cluster}`);
-    if (ctx.options.iUnderstandMainnet) parts.push("--i-understand-mainnet");
-  }
-  return `${ctx.send ? "KEYPAIR=<same keypair> " : ""}${parts.join(" ")}`;
+  return ensureVaultsCommandLine({
+    fund,
+    payer: ctx.payer,
+    rpcUrl: ctx.rpcUrl,
+    send: ctx.send,
+    cluster: ctx.options.cluster,
+    iUnderstandMainnet: ctx.options.iUnderstandMainnet,
+  });
 }
 
 async function planCreate(ctx: Ctx, parsed: Extract<ParsedCli, { command: "create-fund" }>): Promise<Plan> {
@@ -448,29 +451,7 @@ async function run(ctx: Ctx, plan: Plan): Promise<void> {
     return;
   }
 
-  const done: TxOutcome[] = [];
-  for (const [i, tx] of txs.entries()) {
-    const { blockhash, lastValidBlockHeight } = await ctx.connection.getLatestBlockhash("confirmed");
-    const vtx = compile(ctx.payer, tx, blockhash);
-    vtx.sign([ctx.signer!, ...tx.extraSigners]);
-    let signature: string;
-    try {
-      signature = await ctx.connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false });
-    } catch (err) {
-      throw partialFailure(plan, done, i, `was rejected before landing: ${message(err)}`, "not sent");
-    }
-    let result;
-    try {
-      result = await ctx.connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
-    } catch (err) {
-      throw partialFailure(plan, done, i, `${signature} was sent but its status is unknown: ${message(err)}`, "unknown");
-    }
-    if (result.value.err) {
-      throw partialFailure(plan, done, i, `${signature} landed and failed: ${JSON.stringify(result.value.err)}`, "failed");
-    }
-    done.push({ label: tx.label, signature });
-    console.log(`  ${header(i)} sent and confirmed: ${signature}`);
-  }
+  await sendPlan({ connection: ctx.connection, plan, payer: ctx.payer, signers: [ctx.signer!], rpcUrl: ctx.rpcUrl });
 }
 
 function partialFailure(
