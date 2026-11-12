@@ -114,6 +114,10 @@ The probe quotes 20_000 raw USDC.X from the cloned reserves, swaps with `minimum
 
 The authority seed check is a host unit test. It does not change the program.
 
+## Follow-up — NFT metadata
+
+`attach_metadata` and `update_metadata` add holder-controlled Metaplex Token Metadata to the fund NFT (see `ASSUMPTIONS.md` "Fund NFT metadata"). The clone test clones Token Metadata `metaqbxx…` (upgradeable) from X1 mainnet. On the first try, the CPI to `create_master_edition_v3` failed with `Cannot create NFT with no Freeze Authority` (custom error 0x82), so `create_fund` now makes the fund PDA the freeze authority too. The new `.so` is 398,776 bytes, sha256 `8944de68d8dc9da9dc578ad9564ba918c914420f5add2dd791def1a265f04d57`.
+
 ## Follow-up — SBPF v0 and the X1 feature set
 
 X1 mainnet and testnet have SBPF v1 and v3 deployment inactive. Anchor 1.2.2 builds `--arch v3` by default, which is why `--clone-feature-set` failed in Step 6. `anchor build --ignore-keys --arch v0` produces `e_flags` 0, and that `.so` loads under X1's feature set.
