@@ -7,7 +7,8 @@
 # loopback solana-test-validator (upgrade authority: a key generated here),
 # uses it to create a fund, deposit, run execute_dca and attach metadata,
 # sends XNT to the fund PDA, then upgrades exactly as the owner would
-# (program show -> extend -> deploy -> dump + hash), and checks that the
+# (scripts/upgrade-withdraw-native.sh check / apply in UPGRADE_TARGET=local
+# mode, plus the manual extend it must not repeat), and checks that the
 # PRE-EXISTING fund works under the new program: show, withdraw-native part
 # and all, a token withdraw, another execute_dca, and, after the NFT moves to
 # a second wallet, the old holder refused and the new holder allowed.
@@ -26,6 +27,8 @@
 #                     --ignore-keys --arch v0 on this branch). Its sha256 is
 #                     printed; set EXPECT_NEW_SHA to also assert it.
 #   REHEARSE_KEEP=1   keep the work dir.
+#   REHEARSE_PORT_BASES  space-separated 42-port block starts to try
+#                     (default "19200 19250 19300").
 #
 # Isolation: the same rules as keeper/test/e2e-local.sh. Every solana /
 # spl-token call names `-C $CFG` and runs with HOME and XDG_CONFIG_HOME inside
@@ -184,12 +187,12 @@ PY
 # ---- ports, keys, config ----
 port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 RPC_PORT=""
-for base in 19200 19250 19300; do
+for base in ${REHEARSE_PORT_BASES:-19200 19250 19300}; do
   ok=1
   for p in $(seq "$base" $((base + 41))); do port_free "$p" || { ok=0; break; }; done
   if [ "$ok" = 1 ]; then RPC_PORT=$base; break; fi
 done
-[ -n "$RPC_PORT" ] || die "no free 42-port block at 19200/19250/19300"
+[ -n "$RPC_PORT" ] || die "no free 42-port block at ${REHEARSE_PORT_BASES:-19200 19250 19300}"
 URL="http://127.0.0.1:$RPC_PORT"
 echo "validator: $URL"
 
@@ -197,14 +200,16 @@ PAYER_KEY="$WORK/payer.json"       # fund creator, first NFT holder
 AUTH_KEY="$WORK/upgrade-auth.json" # upgrade authority (the owner's DEPLOYER on mainnet)
 HOLDER2_KEY="$WORK/holder2.json"   # receives the NFT at the end
 SECOND_KEY="$WORK/second-program.json" # a second instance for the auto-extend check
-for k in "$PAYER_KEY" "$AUTH_KEY" "$HOLDER2_KEY" "$SECOND_KEY"; do
+THIRD_KEY="$WORK/third-program.json"   # a third instance for the upgrade script's extend path
+for k in "$PAYER_KEY" "$AUTH_KEY" "$HOLDER2_KEY" "$SECOND_KEY" "$THIRD_KEY"; do
   solana-keygen new --no-bip39-passphrase --silent --force -o "$k" >/dev/null || die "keygen $k"
 done
 PAYER="$(solana-keygen pubkey "$PAYER_KEY")"
 AUTH="$(solana-keygen pubkey "$AUTH_KEY")"
 HOLDER2="$(solana-keygen pubkey "$HOLDER2_KEY")"
 SECOND_ID="$(solana-keygen pubkey "$SECOND_KEY")"
-[ -n "$PAYER" ] && [ -n "$AUTH" ] && [ -n "$HOLDER2" ] && [ -n "$SECOND_ID" ] || die "empty pubkeys"
+THIRD_ID="$(solana-keygen pubkey "$THIRD_KEY")"
+[ -n "$PAYER" ] && [ -n "$AUTH" ] && [ -n "$HOLDER2" ] && [ -n "$SECOND_ID" ] && [ -n "$THIRD_ID" ] || die "empty pubkeys"
 solana -C "$CFG" config set --url "$URL" --keypair "$PAYER_KEY" >/dev/null || die "config"
 echo "payer $PAYER, upgrade authority $AUTH, second holder $HOLDER2, second program $SECOND_ID"
 
@@ -246,6 +251,7 @@ start_validator -C "$CFG" --mint "$PAYER" --reset --quiet \
   --ledger "$WORK/ledger" \
   --upgradeable-program "$PROGRAM_ID" "$OLD_SO" "$AUTH" \
   --upgradeable-program "$SECOND_ID" "$OLD_SO" "$AUTH" \
+  --upgradeable-program "$THIRD_ID" "$OLD_SO" "$AUTH" \
   --url "$MAINNET_RPC" \
   --clone-upgradeable-program "$TOKENKEG" --clone-upgradeable-program "$TOKEN_2022" \
   --clone-upgradeable-program "$XDEX" --clone-upgradeable-program "$METAPLEX" \
@@ -436,9 +442,56 @@ done
 [ "$(programdata_len "$PROGRAM_ID")" = "$OLD_DATA_LEN" ] && pass "refused deploy left the old program in place" ||
   fail "refused deploy changed the data length"
 
-# The owner's path: show -> extend -> deploy -> dump.
+# The owner's path is scripts/upgrade-withdraw-native.sh. Here it runs in
+# UPGRADE_TARGET=local mode against this validator (never mainnet). It builds
+# with the real HOME (cargo, platform-tools) but every solana call it makes
+# uses its own -C config with url = this validator and keypair = AUTH_KEY.
+UPGRADER="$REPO/scripts/upgrade-withdraw-native.sh"
+upgrader() {
+  local name="$1" expect="$2"; shift 2
+  local code=0
+  TMPDIR="$WORK" UPGRADE_TARGET=local UPGRADE_URL="$URL" UPGRADE_AUTHORITY="$AUTH" \
+    SOLANA_BIN_DIR="$SOLANA_BIN_DIR" bash "$UPGRADER" "$@" >"$OUT" 2>&1 || code=$?
+  if { [ "$expect" = ok ] && [ "$code" = 0 ]; } || { [ "$expect" = fail ] && [ "$code" != 0 ]; }; then
+    pass "$name (exit $code)"
+  else
+    fail "$name (exit $code, expected $expect)"
+  fi
+  sed 's/^/    /' "$OUT"
+}
+
+echo; echo "== upgrade script: refusals"
+DEPLOYER="$HOLDER2_KEY" UPGRADE_SKIP_BUILD=1 upgrader "check with the wrong DEPLOYER key fails" fail check
+expect_out "wrong key is named" "FAIL: DEPLOYER pubkey $HOLDER2 is not $AUTH"
+DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 upgrader "apply without --i-understand-mainnet is refused" fail apply
+expect_out "apply names the missing flag" "pass --i-understand-mainnet"
+if (TMPDIR="$WORK" UPGRADE_TARGET=local UPGRADE_URL="https://rpc.mainnet.x1.xyz" UPGRADE_AUTHORITY="$AUTH" DEPLOYER="$AUTH_KEY" \
+     SOLANA_BIN_DIR="$SOLANA_BIN_DIR" bash "$UPGRADER" check >"$OUT" 2>&1); then
+  fail "local mode accepted a mainnet URL"
+else
+  grep -q "must be loopback" "$OUT" && pass "local mode refuses a non-loopback URL" || fail "non-loopback refusal text"
+fi
+
+echo; echo "== upgrade script on a third instance: apply from the old length extends, then deploys"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$THIRD_ID" UPGRADE_SKIP_BUILD=1 upgrader "third: apply (extend + deploy)" ok apply --i-understand-mainnet
+expect_out "third: state was extend" "data length $OLD_LEN: extend by $DELTA bytes"
+expect_out "third: on-chain hash asserted" "PASS: on-chain program hash is $NEW_SHA"
+[ "$(programdata_len "$THIRD_ID")" = "$NEW_LEN" ] && pass "third: data length $NEW_LEN" || fail "third: data length $(programdata_len "$THIRD_ID")"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$THIRD_ID" UPGRADE_SKIP_BUILD=1 upgrader "third: apply again is a no-op" ok apply --i-understand-mainnet
+expect_out "third: second apply sees the upgrade" "already upgraded; nothing sent"
+[ "$(programdata_len "$THIRD_ID")" = "$NEW_LEN" ] && pass "third: not extended twice ($NEW_LEN)" || fail "third: extended twice"
+
+echo; echo "== upgrade script on the real program id"
+DEPLOYER="$AUTH_KEY" upgrader "check (fresh build, read-only)" ok check
+expect_out "check deleted and rebuilt the artifact" "PASS: fresh build succeeded"
+expect_out "check: extend by $DELTA" "data length $OLD_LEN: extend by $DELTA bytes, then deploy"
+expect_out "check: balance covers the need" "PASS: DEPLOYER balance [0-9]+ >= [0-9]+ lamports"
+[ "$(sha "$NEW_SO")" = "$NEW_SHA" ] && pass "rebuilt artifact still $NEW_SHA" || fail "rebuilt artifact hash changed"
+[ "$(programdata_len "$PROGRAM_ID")" = "$OLD_DATA_LEN" ] && pass "check sent nothing (data length still $OLD_DATA_LEN)" || fail "check changed the chain"
+
+# An interrupted earlier run that only got as far as the extend.
 solana -C "$CFG" program extend "$PROGRAM_ID" "$DELTA" --keypair "$AUTH_KEY" >"$OUT" 2>&1 &&
-  pass "program extend $PROGRAM_ID $DELTA" || fail "program extend"
+  pass "manual program extend $PROGRAM_ID $DELTA (as if an earlier apply stopped after extend)" || fail "program extend"
 sed 's/^/    /' "$OUT"
 [ "$(programdata_len "$PROGRAM_ID")" = "$NEW_LEN" ] && pass "ProgramData data length is now $NEW_LEN" ||
   fail "ProgramData data length $(programdata_len "$PROGRAM_ID") after extend"
@@ -450,11 +503,15 @@ expect_out "old program simulation ok after extend" "simulation: ok, [0-9]+ comp
 run_fail "$PAYER_KEY" "after extend, before deploy, withdraw_native is still unknown" "\"Custom\":101" \
   withdraw-native --fund "$FUND" --amount all
 AUTH_BEFORE="$(lamports_of "$AUTH")"
-solana -C "$CFG" program deploy "$NEW_SO" --program-id "$PROGRAM_ID" --upgrade-authority "$AUTH_KEY" \
-  --keypair "$AUTH_KEY" --with-compute-unit-price 1000 >"$OUT" 2>&1 &&
-  pass "program deploy (upgrade) to $PROGRAM_ID" || fail "program deploy (upgrade)"
-sed 's/^/    /' "$OUT"
-echo "authority spent $((AUTH_BEFORE - $(lamports_of "$AUTH"))) lamports on the upgrade after extend (fees only; buffer rent refunded)"
+DEPLOYER="$AUTH_KEY" upgrader "apply after the extend (reruns check with a fresh build, deploys)" ok apply --i-understand-mainnet
+expect_out "apply sees the extended state" "already extended, not yet deployed\): no extend, deploy only"
+expect_out "apply asserted the on-chain hash" "PASS: on-chain program hash is $NEW_SHA"
+if grep -q "extending ProgramData" "$OUT"; then fail "apply extended an already-extended program"; else pass "apply did not extend again"; fi
+echo "authority spent $((AUTH_BEFORE - $(lamports_of "$AUTH"))) lamports on apply after extend (fees only; buffer rent refunded)"
+[ "$(programdata_len "$PROGRAM_ID")" = "$NEW_LEN" ] && pass "data length still $NEW_LEN after apply" || fail "data length changed by apply"
+DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 upgrader "apply again is a no-op" ok apply --i-understand-mainnet
+expect_out "second apply sees the upgrade" "already upgraded; nothing sent"
+[ "$(programdata_len "$PROGRAM_ID")" = "$NEW_LEN" ] && pass "not extended twice ($NEW_LEN)" || fail "extended twice"
 solana -C "$CFG" program show "$PROGRAM_ID" >"$OUT" 2>&1
 sed 's/^/    /' "$OUT"
 grep -Eq "Authority: *$AUTH" "$OUT" && pass "authority unchanged after upgrade" || fail "authority changed"
