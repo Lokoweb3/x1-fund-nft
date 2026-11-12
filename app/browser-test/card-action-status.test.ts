@@ -64,11 +64,13 @@ before(async () => {
   server = createServer((req, res) => {
     const path = normalize(join(out, decodeURIComponent((req.url ?? "/").split("?")[0]!)));
     if (!path.startsWith(out + sep)) return res.writeHead(403).end();
+    let body: Buffer;
     try {
-      res.writeHead(200, { "content-type": types[extname(path)] ?? "application/octet-stream" }).end(readFileSync(path));
+      body = readFileSync(path);
     } catch {
-      res.writeHead(404).end();
+      return res.writeHead(404).end();
     }
+    res.writeHead(200, { "content-type": types[extname(path)] ?? "application/octet-stream" }).end(body);
   });
   await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -136,4 +138,12 @@ test("a deposit's status never shows in another action's panel: switch during th
 
   assert.deepEqual(errors, []);
   await page.close();
+});
+
+test("the harness server answers a missing file with one 404", async (t) => {
+  if (skip) return t.skip(skip);
+  const r = await fetch(`${origin}/favicon.ico`);
+  assert.equal(r.status, 404);
+  const ok = await fetch(`${origin}/browser-test/fixtures/fund-detail.html`);
+  assert.equal(ok.status, 200);
 });
