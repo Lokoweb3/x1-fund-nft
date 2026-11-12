@@ -18,11 +18,13 @@ import {
   type EnvLike,
   type TargetSpec,
 } from "./core/owner.js";
+import { validateMetadataFields, validateMetadataUpdate, type MetadataFields, type MetadataUpdate } from "./core/metadata.js";
 
 export * from "./core/owner.js";
+export * from "./core/metadata.js";
 
-export type Command = "create-fund" | "deposit" | "withdraw" | "show" | "ensure-vaults";
-export const COMMANDS: readonly Command[] = ["create-fund", "deposit", "withdraw", "show", "ensure-vaults"];
+export type Command = "create-fund" | "deposit" | "withdraw" | "show" | "ensure-vaults" | "set-metadata";
+export const COMMANDS: readonly Command[] = ["create-fund", "deposit", "withdraw", "show", "ensure-vaults", "set-metadata"];
 
 export interface CommonOptions {
   send: boolean;
@@ -34,11 +36,12 @@ export interface CommonOptions {
 }
 
 export type ParsedCli =
-  | { command: "create-fund"; options: CommonOptions; create: CreateFundArgs }
+  | { command: "create-fund"; options: CommonOptions; create: CreateFundArgs; metadata: MetadataFields | undefined }
   | { command: "deposit"; options: CommonOptions; fund: PublicKey; amount: bigint }
   | { command: "withdraw"; options: CommonOptions; fund: PublicKey; mint: PublicKey; amount: bigint | "all" }
   | { command: "show"; options: CommonOptions; fund: PublicKey }
-  | { command: "ensure-vaults"; options: CommonOptions; fund: PublicKey };
+  | { command: "ensure-vaults"; options: CommonOptions; fund: PublicKey }
+  | { command: "set-metadata"; options: CommonOptions; fund: PublicKey; update: MetadataUpdate };
 
 const VALUE_FLAGS = new Set([
   "--quote",
@@ -54,15 +57,30 @@ const VALUE_FLAGS = new Set([
   "--cluster",
   "--rpc",
   "--xdex",
+  "--name",
+  "--symbol",
+  "--uri",
 ]);
 const BOOL_FLAGS = new Set(["--send", "--i-understand-mainnet"]);
 
 const ALLOWED: Record<Command, string[]> = {
-  "create-fund": ["--quote", "--target", "--per-run", "--interval", "--window", "--max-dev-bps", "--xdex"],
+  "create-fund": [
+    "--quote",
+    "--target",
+    "--per-run",
+    "--interval",
+    "--window",
+    "--max-dev-bps",
+    "--xdex",
+    "--name",
+    "--symbol",
+    "--uri",
+  ],
   deposit: ["--fund", "--amount"],
   withdraw: ["--fund", "--mint", "--amount"],
   show: ["--fund"],
   "ensure-vaults": ["--fund"],
+  "set-metadata": ["--fund", "--name", "--symbol", "--uri"],
 };
 const COMMON = ["--payer", "--cluster", "--rpc", "--send", "--i-understand-mainnet"];
 
@@ -71,11 +89,16 @@ export const USAGE = `usage: npx tsx src/cli.ts <command> [flags]
 commands:
   create-fund --quote <mint> --target <mint>:<pool>:<bps> [--target ...]
               --per-run <raw> --interval <secs> --window <secs> --max-dev-bps <n>
-              (the cash slice is --target <quoteMint>:default:<bps>; localnet only: --xdex <id>)
+              [--name <text> --symbol <text> --uri <url>]
+              (the cash slice is --target <quoteMint>:default:<bps>; localnet only: --xdex <id>;
+               --name/--symbol/--uri together attach NFT metadata as tx 2)
   deposit     --fund <pda> --amount <raw>
   withdraw    --fund <pda> --mint <mint> --amount <raw|all>
   show        --fund <pda>
   ensure-vaults --fund <pda>   create any missing quote/target vault ATAs (idempotent)
+  set-metadata --fund <pda> [--name <text>] [--symbol <text>] [--uri <url>]
+              NFT holder only: attach metadata (all three needed) or update the given fields
+              (limits: name 32, symbol 10, uri 200 UTF-8 bytes)
 
 common flags:
   --payer <pubkey>          fee payer / signer for simulation when KEYPAIR is unset
@@ -168,7 +191,18 @@ export function parseCli(argv: string[]): ParsedCli {
         maxDevBps: Number(parseUint(need("--max-dev-bps"), "--max-dev-bps", 0xffffn)),
       };
       validateCreateFund(create);
-      return { command: cmd, options, create };
+      const name = one("--name");
+      const symbol = one("--symbol");
+      const uri = one("--uri");
+      let metadata: MetadataFields | undefined;
+      if (name !== undefined || symbol !== undefined || uri !== undefined) {
+        if (name === undefined || symbol === undefined || uri === undefined) {
+          throw new Error("create-fund: --name, --symbol and --uri go together (all three or none)");
+        }
+        metadata = { name, symbol, uri };
+        validateMetadataFields(metadata);
+      }
+      return { command: cmd, options, create, metadata };
     }
     case "deposit": {
       const amount = parseUint(need("--amount"), "--amount", U64_MAX);
@@ -190,6 +224,20 @@ export function parseCli(argv: string[]): ParsedCli {
     case "show":
     case "ensure-vaults":
       return { command: cmd, options, fund: parsePubkey(need("--fund"), "--fund") };
+    case "set-metadata": {
+      const update: MetadataUpdate = {};
+      const name = one("--name");
+      const symbol = one("--symbol");
+      const uri = one("--uri");
+      if (name !== undefined) update.name = name;
+      if (symbol !== undefined) update.symbol = symbol;
+      if (uri !== undefined) update.uri = uri;
+      if (name === undefined && symbol === undefined && uri === undefined) {
+        throw new Error("set-metadata needs at least one of --name, --symbol, --uri");
+      }
+      validateMetadataUpdate(update);
+      return { command: cmd, options, fund: parsePubkey(need("--fund"), "--fund"), update };
+    }
   }
 }
 

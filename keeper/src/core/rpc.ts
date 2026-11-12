@@ -43,6 +43,19 @@ import {
   type PlannedTx,
 } from "./owner.js";
 import { readPool, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "./pool.js";
+import {
+  buildAttachMetadataIx,
+  buildUpdateMetadataIx,
+  decodeMetadata,
+  masterEditionPda,
+  metadataPda,
+  METAPLEX_PROGRAM_ID,
+  validateMetadataFields,
+  validateMetadataUpdate,
+  type MetadataFields,
+  type MetadataUpdate,
+  type StoredMetadata,
+} from "./metadata.js";
 
 /** What a planner needs: the RPC, an Anchor Program for the coder, the fee payer, and the compute-budget instructions. */
 export interface PlanContext {
@@ -208,19 +221,25 @@ export interface CreateFundPrepared {
 }
 
 /**
- * Pool checks, then the two-transaction create-fund plan with a fresh NFT
- * mint keypair (held in memory only), size-checked. `plan.recovery` is left
- * for the caller to set.
+ * Pool checks, then the create-fund plan (create_fund + quote vault, then
+ * attach_metadata when `metadata` is given, then the target vaults) with a
+ * fresh NFT mint keypair (held in memory only), size-checked.
+ * `plan.recovery` is left for the caller to set.
  */
 export async function prepareCreateFund(
   ctx: PlanContext,
   args: CreateFundArgs,
   xdex: PublicKey,
+  metadata?: MetadataFields,
 ): Promise<CreateFundPrepared> {
+  if (metadata) {
+    validateMetadataFields(metadata);
+    await assertMetadataProgramDeployed(ctx.connection);
+  }
   const { quote, targetMints } = await readCreateFundMints(ctx.connection, args, xdex);
   const nft = Keypair.generate();
   const fund = fundPda(nft.publicKey, ctx.program.programId);
-  const txs = await planCreateFund(ctx.program, ctx.payer, nft, args, quote, targetMints, ctx.budget);
+  const txs = await planCreateFund(ctx.program, ctx.payer, nft, args, quote, targetMints, ctx.budget, metadata);
   // Refuse an oversized plan before anything looks final.
   assertPlanFits(ctx.payer, txs, CREATE_FUND_SIZE_HINT);
   return {
@@ -471,6 +490,119 @@ export async function prepareEnsureVaults(
     },
     vaults,
     missing,
+  };
+}
+
+// ---- metadata ----
+
+/** Throws unless Token Metadata is deployed (executable) on this RPC. */
+export async function assertMetadataProgramDeployed(connection: Connection): Promise<void> {
+  const info = await connection.getAccountInfo(METAPLEX_PROGRAM_ID);
+  if (!info || !info.executable) {
+    throw new Error(
+      `Token Metadata ${METAPLEX_PROGRAM_ID.toBase58()} is not deployed on this RPC; ` +
+        "metadata cannot be attached. Nothing was simulated or sent.",
+    );
+  }
+}
+
+/** The fund NFT's stored metadata, or undefined when none is attached. */
+export async function readFundMetadata(
+  connection: Connection,
+  nftMint: PublicKey,
+): Promise<{ address: PublicKey; edition: PublicKey; editionExists: boolean; stored: StoredMetadata | undefined }> {
+  const address = metadataPda(nftMint);
+  const edition = masterEditionPda(nftMint);
+  const [md, ed] = await connection.getMultipleAccountsInfo([address, edition], "confirmed");
+  let stored: StoredMetadata | undefined;
+  if (md) {
+    if (!md.owner.equals(METAPLEX_PROGRAM_ID)) {
+      throw new Error(`metadata account ${address.toBase58()} is owned by ${md.owner.toBase58()}, not Token Metadata`);
+    }
+    stored = decodeMetadata(md.data);
+  }
+  return { address, edition, editionExists: ed !== null && ed !== undefined, stored };
+}
+
+export interface SetMetadataSummary {
+  fund: PublicKey;
+  nftMint: PublicKey;
+  holder: PublicKey;
+  nftAccount: NftAccount | undefined;
+  /** attach when no metadata exists yet (needs all three fields), else update. */
+  mode: "attach" | "update";
+  current: StoredMetadata | undefined;
+  /** Fields after the change. */
+  next: MetadataFields;
+  metadata: PublicKey;
+  /** False when the payer does not hold the fund NFT; the program will reject this. */
+  payerHoldsNft: boolean;
+}
+
+/**
+ * set-metadata: attach_metadata when the fund NFT has no metadata (all of
+ * name, symbol and uri required), otherwise update_metadata with only the
+ * given fields. The payer must hold the NFT; the program checks it.
+ */
+export async function prepareSetMetadata(
+  ctx: PlanContext,
+  fundKey: PublicKey,
+  update: MetadataUpdate,
+): Promise<{ plan: Plan; summary: SetMetadataSummary }> {
+  if (update.name === undefined && update.symbol === undefined && update.uri === undefined) {
+    throw new Error("set-metadata needs at least one of --name, --symbol, --uri");
+  }
+  validateMetadataUpdate(update);
+  await assertMetadataProgramDeployed(ctx.connection);
+  const fund = await loadFund(ctx.connection, ctx.program, fundKey);
+  const nftAccount = await findNftAccount(ctx.connection, fund.nftMint);
+  const md = await readFundMetadata(ctx.connection, fund.nftMint);
+  const accounts = {
+    holder: ctx.payer,
+    nftMint: fund.nftMint,
+    nftAccount: nftAccount ? nftAccount.address : associatedTokenAddress(ctx.payer, fund.nftMint, NFT_TOKEN_PROGRAM_ID),
+  };
+  let ix: TransactionInstruction;
+  let mode: SetMetadataSummary["mode"];
+  let next: MetadataFields;
+  if (!md.stored) {
+    if (md.editionExists) throw new Error(`master edition ${md.edition.toBase58()} exists without metadata`);
+    if (update.name === undefined || update.symbol === undefined || update.uri === undefined) {
+      throw new Error("this fund NFT has no metadata yet; attaching it needs all of --name, --symbol and --uri");
+    }
+    next = { name: update.name, symbol: update.symbol, uri: update.uri };
+    ix = await buildAttachMetadataIx(ctx.program, accounts, next);
+    mode = "attach";
+  } else {
+    if (!md.stored.updateAuthority.equals(fundKey)) {
+      throw new Error(
+        `metadata ${md.address.toBase58()} has update authority ${md.stored.updateAuthority.toBase58()}, not the fund`,
+      );
+    }
+    next = {
+      name: update.name ?? md.stored.name,
+      symbol: update.symbol ?? md.stored.symbol,
+      uri: update.uri ?? md.stored.uri,
+    };
+    ix = await buildUpdateMetadataIx(ctx.program, accounts, update);
+    mode = "update";
+  }
+  return {
+    plan: {
+      txs: [{ label: mode === "attach" ? "attach_metadata" : "update_metadata", instructions: [...ctx.budget, ix], extraSigners: [] }],
+      fund: fundKey,
+    },
+    summary: {
+      fund: fundKey,
+      nftMint: fund.nftMint,
+      holder: ctx.payer,
+      nftAccount,
+      mode,
+      current: md.stored,
+      next,
+      metadata: md.address,
+      payerHoldsNft: nftAccount !== undefined && nftAccount.owner.equals(ctx.payer),
+    },
   };
 }
 

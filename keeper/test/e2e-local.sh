@@ -53,6 +53,7 @@ AUTHORITY="9Dpjw2pB5kXJr6ZTHiqzEMfJPic3om9jgNacnwpLCoaU"
 TOKENKEG="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022="TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 ATA_PROGRAM="ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+METAPLEX="metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
 X1_SYSVAR_SYSCALL_EXCEPTION="CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq"
 
 SO="$REPO/target/deploy/fund_nft.so"
@@ -217,7 +218,7 @@ start_validator -C "$CFG" --mint "$PAYER" --reset --quiet \
   --bpf-program "$PROGRAM_ID" "$SO" \
   --url "$MAINNET_RPC" \
   --clone-upgradeable-program "$TOKENKEG" --clone-upgradeable-program "$TOKEN_2022" \
-  --clone-upgradeable-program "$XDEX" \
+  --clone-upgradeable-program "$XDEX" --clone-upgradeable-program "$METAPLEX" \
   --account "$USDC" "$USDC_FILE" \
   "${CLONES[@]}" "${FEATURE_ARGS[@]}"
 [ -n "$VALIDATOR_PID" ] || die "validator did not start"
@@ -354,6 +355,71 @@ run_ok "$PAYER_KEY" "withdraw all USDC.X --send" withdraw --fund "$FUND" --mint 
 run_ok "" "show after withdraw all" show --fund "$FUND"
 expect_out "budget total 0" "budget total +0 quote \\(raw 0\\)"
 expect_out "quote vault empty" "$USDC [1-9A-HJ-NP-Za-km-z]+ 0 \\(raw 0\\)"
+
+echo; echo "== NFT metadata (create-fund --name/--symbol/--uri, set-metadata)"
+MD=(--name "E2E Fund" --symbol "E2E" --uri "https://example.invalid/e2e/1.json")
+run_ok "" "create-fund with metadata, simulate-only" "${CREATE[@]}" "${MD[@]}" --payer "$PAYER"
+expect_out "attach_metadata is tx 2/3" "tx 2/3 \(attach_metadata\): [0-9]+ bytes"
+expect_out "attach_metadata is left to the send-time preflight" "simulation: not run yet; it needs the accounts tx 1/3 creates"
+expect_out "simulate-only sent nothing" "nothing was signed or sent"
+run_ok "$PAYER_KEY" "create-fund with metadata --send" "${CREATE[@]}" "${MD[@]}" --send --cluster localnet
+MDFUND="$(sed -n 's/^fund PDA: *//p' "$OUT")"
+MDNFT="$(sed -n 's/^NFT mint (generated in memory): *//p' "$OUT")"
+[ -n "$MDFUND" ] && pass "metadata fund PDA: $MDFUND" || fail "no metadata fund PDA"
+[ "$(grep -c 'sent and confirmed' "$OUT")" = 3 ] && pass "three confirmed signatures" || fail "expected three confirmations"
+expect_out "attach confirmed as tx 2/3" "tx 2/3 \(attach_metadata\) sent and confirmed"
+run_ok "" "show metadata fund" show --fund "$MDFUND"
+expect_out "metadata shown" 'NFT metadata +"E2E Fund" \("E2E"\) https://example.invalid/e2e/1.json'
+expect_out "update authority is the fund" "update authority $MDFUND"
+expect_out "master edition exists" "master edition [1-9A-HJ-NP-Za-km-z]+ exists"
+EDITION="$(sed -n 's/^ *master edition \([1-9A-HJ-NP-Za-km-z]*\) exists$/\1/p' "$OUT")"
+if [ -n "$EDITION" ] && spl-token -C "$CFG" display "$MDNFT" >"$WORK/nft.txt" 2>&1; then
+  sed 's/^/    /' "$WORK/nft.txt"
+  grep -Eq "Mint authority: *$EDITION" "$WORK/nft.txt" && pass "NFT mint authority is the master edition" ||
+    fail "NFT mint authority is not the edition $EDITION"
+  grep -Eq "Freeze authority: *$EDITION" "$WORK/nft.txt" && pass "NFT freeze authority is the master edition" ||
+    fail "NFT freeze authority is not the edition $EDITION"
+  grep -Eq "Supply: *1$" "$WORK/nft.txt" && pass "NFT supply is 1" || fail "NFT supply is not 1"
+else
+  fail "could not display NFT mint $MDNFT"
+fi
+spl() { spl-token -C "$CFG" "$@"; }
+if spl mint "$MDNFT" 1 --mint-authority "$PAYER_KEY" --fee-payer "$PAYER_KEY" >"$WORK/mint2.txt" 2>&1; then
+  fail "payer minted a second NFT"
+else
+  pass "payer cannot mint a second NFT"
+fi
+sed 's/^/    /' "$WORK/mint2.txt"
+
+run_ok "$PAYER_KEY" "holder set-metadata --uri" set-metadata --fund "$MDFUND" \
+  --uri "https://example.invalid/e2e/2.json" --send --cluster localnet
+expect_out "set-metadata used update_metadata" "Summary of set-metadata \(update_metadata\)"
+expect_out "uri change shown" '"https://example.invalid/e2e/1.json" -> "https://example.invalid/e2e/2.json"'
+expect_out "update confirmed" "tx 1/1 \(update_metadata\) sent and confirmed"
+run_ok "" "show after update" show --fund "$MDFUND"
+expect_out "new uri, name kept" 'NFT metadata +"E2E Fund" \("E2E"\) https://example.invalid/e2e/2.json'
+
+run_fail "$STRANGER_KEY" "non-holder set-metadata is rejected by the program" "BadNft" \
+  set-metadata --fund "$MDFUND" --uri "https://example.invalid/stolen.json" --send --cluster localnet
+expect_out "non-holder warning printed" "does not hold the fund NFT"
+run_ok "" "show after rejected update" show --fund "$MDFUND"
+expect_out "uri unchanged" "https://example.invalid/e2e/2.json"
+run_fail "$PAYER_KEY" "33-byte name is refused client-side" "name is 33 bytes; the limit is 32" \
+  set-metadata --fund "$MDFUND" --name "123456789012345678901234567890123"
+
+run_fail "$PAYER_KEY" "attaching to a fund without metadata needs every field" "attaching it needs all of" \
+  set-metadata --fund "$FUND" --uri "https://example.invalid/e2e/3.json"
+run_ok "$PAYER_KEY" "set-metadata attaches to a fund created without metadata" set-metadata --fund "$FUND" \
+  --name "First fund" --symbol "F1" --uri "https://example.invalid/e2e/3.json" --send --cluster localnet
+expect_out "set-metadata used attach_metadata" "Summary of set-metadata \(attach_metadata\)"
+expect_out "attach confirmed" "tx 1/1 \(attach_metadata\) sent and confirmed"
+run_ok "" "show first fund metadata" show --fund "$FUND"
+expect_out "first fund metadata shown" 'NFT metadata +"First fund" \("F1"\) https://example.invalid/e2e/3.json'
+run_ok "$PAYER_KEY" "deposit into the metadata fund" deposit --fund "$MDFUND" --amount 100000 --send --cluster localnet
+run_ok "$PAYER_KEY" "holder withdraw still works after attach" withdraw --fund "$MDFUND" --mint "$USDC" --amount 50000 --send --cluster localnet
+expect_out "withdraw confirmed" "tx 1/1 \(withdraw\) sent and confirmed"
+run_fail "$STRANGER_KEY" "non-holder withdraw from the metadata fund is rejected" "BadNft" \
+  withdraw --fund "$MDFUND" --mint "$USDC" --amount 1 --send --cluster localnet
 
 echo
 echo "e2e-local: $PASS passed, $FAIL failed (feature mode ${E2E_FEATURES:-x1}, NFT $NFT)"

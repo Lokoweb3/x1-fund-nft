@@ -8,6 +8,283 @@
   },
   "instructions": [
     {
+      "name": "attach_metadata",
+      "discriminator": [
+        108,
+        247,
+        212,
+        125,
+        7,
+        240,
+        165,
+        112
+      ],
+      "accounts": [
+        {
+          "name": "holder",
+          "docs": [
+            "Current NFT holder. Pays rent for the metadata and edition accounts."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "fund"
+        },
+        {
+          "name": "nft_mint",
+          "writable": true
+        },
+        {
+          "name": "nft_account"
+        },
+        {
+          "name": "metadata",
+          "docs": [
+            "Token Metadata creates it."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  101,
+                  116,
+                  97,
+                  100,
+                  97,
+                  116,
+                  97
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  11,
+                  112,
+                  101,
+                  177,
+                  227,
+                  209,
+                  124,
+                  69,
+                  56,
+                  157,
+                  82,
+                  127,
+                  107,
+                  4,
+                  195,
+                  205,
+                  88,
+                  184,
+                  108,
+                  115,
+                  26,
+                  160,
+                  253,
+                  181,
+                  73,
+                  182,
+                  209,
+                  188,
+                  3,
+                  248,
+                  41,
+                  70
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "nft_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                11,
+                112,
+                101,
+                177,
+                227,
+                209,
+                124,
+                69,
+                56,
+                157,
+                82,
+                127,
+                107,
+                4,
+                195,
+                205,
+                88,
+                184,
+                108,
+                115,
+                26,
+                160,
+                253,
+                181,
+                73,
+                182,
+                209,
+                188,
+                3,
+                248,
+                41,
+                70
+              ]
+            }
+          }
+        },
+        {
+          "name": "master_edition",
+          "docs": [
+            "Must be empty; Token Metadata creates it."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  101,
+                  116,
+                  97,
+                  100,
+                  97,
+                  116,
+                  97
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  11,
+                  112,
+                  101,
+                  177,
+                  227,
+                  209,
+                  124,
+                  69,
+                  56,
+                  157,
+                  82,
+                  127,
+                  107,
+                  4,
+                  195,
+                  205,
+                  88,
+                  184,
+                  108,
+                  115,
+                  26,
+                  160,
+                  253,
+                  181,
+                  73,
+                  182,
+                  209,
+                  188,
+                  3,
+                  248,
+                  41,
+                  70
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "nft_mint"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  100,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                11,
+                112,
+                101,
+                177,
+                227,
+                209,
+                124,
+                69,
+                56,
+                157,
+                82,
+                127,
+                107,
+                4,
+                195,
+                205,
+                88,
+                184,
+                108,
+                115,
+                26,
+                160,
+                253,
+                181,
+                73,
+                182,
+                209,
+                188,
+                3,
+                248,
+                41,
+                70
+              ]
+            }
+          }
+        },
+        {
+          "name": "nft_token_program"
+        },
+        {
+          "name": "metadata_program"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "symbol",
+          "type": "string"
+        },
+        {
+          "name": "uri",
+          "type": "string"
+        }
+      ]
+    },
+    {
       "name": "create_fund",
       "discriminator": [
         38,
@@ -268,6 +545,163 @@
       ]
     },
     {
+      "name": "update_metadata",
+      "discriminator": [
+        170,
+        182,
+        43,
+        239,
+        97,
+        78,
+        225,
+        186
+      ],
+      "accounts": [
+        {
+          "name": "holder",
+          "signer": true
+        },
+        {
+          "name": "fund"
+        },
+        {
+          "name": "nft_mint"
+        },
+        {
+          "name": "nft_account"
+        },
+        {
+          "name": "metadata",
+          "docs": [
+            "Owned by Token Metadata (checked by the account type), at the PDA of",
+            "`nft_mint`."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  101,
+                  116,
+                  97,
+                  100,
+                  97,
+                  116,
+                  97
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  11,
+                  112,
+                  101,
+                  177,
+                  227,
+                  209,
+                  124,
+                  69,
+                  56,
+                  157,
+                  82,
+                  127,
+                  107,
+                  4,
+                  195,
+                  205,
+                  88,
+                  184,
+                  108,
+                  115,
+                  26,
+                  160,
+                  253,
+                  181,
+                  73,
+                  182,
+                  209,
+                  188,
+                  3,
+                  248,
+                  41,
+                  70
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "nft_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                11,
+                112,
+                101,
+                177,
+                227,
+                209,
+                124,
+                69,
+                56,
+                157,
+                82,
+                127,
+                107,
+                4,
+                195,
+                205,
+                88,
+                184,
+                108,
+                115,
+                26,
+                160,
+                253,
+                181,
+                73,
+                182,
+                209,
+                188,
+                3,
+                248,
+                41,
+                70
+              ]
+            }
+          }
+        },
+        {
+          "name": "nft_token_program"
+        },
+        {
+          "name": "metadata_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": {
+            "option": "string"
+          }
+        },
+        {
+          "name": "symbol",
+          "type": {
+            "option": "string"
+          }
+        },
+        {
+          "name": "uri",
+          "type": {
+            "option": "string"
+          }
+        }
+      ]
+    },
+    {
       "name": "withdraw",
       "discriminator": [
         183,
@@ -347,6 +781,32 @@
         146,
         26,
         69
+      ]
+    },
+    {
+      "name": "MetadataAttached",
+      "discriminator": [
+        106,
+        100,
+        117,
+        215,
+        227,
+        175,
+        144,
+        211
+      ]
+    },
+    {
+      "name": "MetadataUpdated",
+      "discriminator": [
+        132,
+        36,
+        215,
+        246,
+        166,
+        90,
+        189,
+        44
       ]
     }
   ],
@@ -555,6 +1015,56 @@
       "code": 6040,
       "name": "TargetMintAccounts",
       "msg": "Remaining accounts must be the non-cash target mints, in target order"
+    },
+    {
+      "code": 6041,
+      "name": "TargetIsNftMint",
+      "msg": "A target mint cannot be the fund NFT mint"
+    },
+    {
+      "code": 6042,
+      "name": "BadMetadataProgram",
+      "msg": "The metadata program is not the allowlisted Token Metadata program"
+    },
+    {
+      "code": 6043,
+      "name": "MetadataNameTooLong",
+      "msg": "Metadata name is longer than 32 bytes"
+    },
+    {
+      "code": 6044,
+      "name": "MetadataSymbolTooLong",
+      "msg": "Metadata symbol is longer than 10 bytes"
+    },
+    {
+      "code": 6045,
+      "name": "MetadataUriTooLong",
+      "msg": "Metadata URI is longer than 200 bytes"
+    },
+    {
+      "code": 6046,
+      "name": "MetadataNul",
+      "msg": "Metadata fields cannot contain NUL bytes"
+    },
+    {
+      "code": 6047,
+      "name": "MetadataExists",
+      "msg": "The fund NFT already has metadata"
+    },
+    {
+      "code": 6048,
+      "name": "NftMintAuthority",
+      "msg": "The fund PDA is not the NFT mint authority, or the NFT supply is not 1"
+    },
+    {
+      "code": 6049,
+      "name": "BadMetadata",
+      "msg": "The metadata account does not belong to this fund NFT"
+    },
+    {
+      "code": 6050,
+      "name": "NothingToUpdate",
+      "msg": "Nothing to update"
     }
   ],
   "types": [
@@ -678,6 +1188,46 @@
                 }
               }
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "MetadataAttached",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "fund",
+            "type": "pubkey"
+          },
+          {
+            "name": "nft_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "holder",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MetadataUpdated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "fund",
+            "type": "pubkey"
+          },
+          {
+            "name": "nft_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "holder",
+            "type": "pubkey"
           }
         ]
       }
