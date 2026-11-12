@@ -861,6 +861,16 @@ fn check_metadata_flow(
             &edition_account.data,
         )
         .expect("decode master edition");
+    let md_account = rpc
+        .get_account(&fund_nft::metaplex::metadata_address(&nft_mint))
+        .unwrap();
+    println!(
+        "metadata account {} bytes, {} lamports; master edition {} bytes, {} lamports (paid by the holder)",
+        md_account.data.len(),
+        md_account.lamports,
+        edition_account.data.len(),
+        edition_account.lamports
+    );
     assert_eq!(master.max_supply, Some(0), "no prints");
     assert_eq!(master.supply, 0);
 
