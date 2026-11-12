@@ -5,6 +5,7 @@ use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, Tran
 
 use crate::accounting::{self, AccountingError};
 use crate::errors::FundError;
+use crate::mint_policy::require_allowed_mint;
 use crate::state::{Fund, FUND_SEED, TIP_BPS};
 use crate::token_fee::{self, FeeParseError};
 use crate::twap::{self, QuoteInput, SwapDirection, TransferFee};
@@ -105,6 +106,11 @@ pub fn handle_execute_dca(ctx: Context<ExecuteDca>, target_index: u8) -> Result<
         &ctx.accounts.target_mint.to_account_info(),
         &ctx.accounts.target_token_program.key(),
     )?;
+    // Same policy as create_fund, checked before the tip and swap CPIs.
+    // Token-2022 fixes most mint extensions at initialization, but the
+    // re-check costs little and also covers metadata/group entries added later.
+    require_allowed_mint(&ctx.accounts.quote_mint.to_account_info())?;
+    require_allowed_mint(&ctx.accounts.target_mint.to_account_info())?;
     require!(
         ctx.accounts.quote_vault.key()
             == ata(

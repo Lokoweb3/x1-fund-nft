@@ -78,4 +78,10 @@ pub enum FundError {
     VaultCloseAuthority,
     #[msg("The TWAP minimum output rounded to zero")]
     ZeroMinOut,
+    #[msg("The mint has a Token-2022 extension that is not on the allowlist")]
+    DisallowedMintExtension,
+    #[msg("The account is not an initialized SPL Token or Token-2022 mint")]
+    BadMintAccount,
+    #[msg("Remaining accounts must be the non-cash target mints, in target order")]
+    TargetMintAccounts,
 }

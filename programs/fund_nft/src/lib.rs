@@ -4,6 +4,7 @@
 pub mod accounting;
 pub mod errors;
 pub mod instructions;
+pub mod mint_policy;
 pub mod state;
 pub mod token_fee;
 pub mod twap;

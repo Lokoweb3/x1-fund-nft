@@ -4,6 +4,7 @@ use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, Tran
 
 use crate::accounting::{self, AccountingError};
 use crate::errors::FundError;
+use crate::mint_policy::require_allowed_mint;
 use crate::state::Fund;
 
 #[derive(Accounts)]
@@ -30,6 +31,7 @@ pub fn handle_deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         ctx.accounts.quote_mint.to_account_info().owner == &ctx.accounts.token_program.key(),
         FundError::BadTokenProgram
     );
+    require_allowed_mint(&ctx.accounts.quote_mint.to_account_info())?;
     require!(
         ctx.accounts.depositor_quote.mint == fund.quote_mint
             && ctx.accounts.depositor_quote.owner == ctx.accounts.depositor.key(),

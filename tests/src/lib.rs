@@ -189,6 +189,8 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
             associated_token_program: spl_associated_token_account_interface::program::ID,
             system_program: System::id(),
         })
+        // Remaining accounts: non-cash target mints in target order.
+        .accounts(AccountMeta::new_readonly(test_mint, false))
         .args(fund_nft::instruction::CreateFund { params })
         .signer(&nft_mint)
         .send()

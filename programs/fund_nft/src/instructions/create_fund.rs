@@ -3,11 +3,15 @@ use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token_interface::{self, Mint, SetAuthority, TokenAccount, TokenInterface};
 
 use crate::errors::FundError;
+use crate::mint_policy::require_allowed_mint;
 use crate::state::{validate_create, CreateFundParams, Fund, Target, FUND_SEED};
 
 /// Classic SPL Token program. Verified present and executable on X1 mainnet.
 pub const NFT_TOKEN_PROGRAM_ID: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
+/// Remaining accounts: one mint account per non-cash target, in target order
+/// (the cash slice, whose mint is the quote mint, is skipped). Each must match
+/// the target's mint and pass the mint extension allowlist.
 #[derive(Accounts)]
 pub struct CreateFund<'info> {
     #[account(mut)]
@@ -48,6 +52,19 @@ pub fn handle_create_fund(ctx: Context<CreateFund>, params: CreateFundParams) ->
     let nft_mint = ctx.accounts.nft_mint.key();
     require!(quote_mint != nft_mint, FundError::QuoteMintMismatch);
     validate_create(&quote_mint, &params)?;
+    require_allowed_mint(&ctx.accounts.quote_mint.to_account_info())?;
+    let mut mint_accounts = ctx.remaining_accounts.iter();
+    for target in params.targets.iter().filter(|t| t.mint != quote_mint) {
+        let account = mint_accounts
+            .next()
+            .ok_or(FundError::TargetMintAccounts)?;
+        require!(account.key() == target.mint, FundError::TargetMintAccounts);
+        require_allowed_mint(account)?;
+    }
+    require!(
+        mint_accounts.next().is_none(),
+        FundError::TargetMintAccounts
+    );
 
     let bump = ctx.bumps.fund;
     {
