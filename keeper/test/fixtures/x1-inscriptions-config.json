@@ -1,0 +1,10 @@
+{
+  "what": "the program's Config PDA [\"config\"]",
+  "address": "E33orhudcHnVwA46WejnDMXZ3HCdGQaf572r2oKcy3HP",
+  "owner": "X1insUpfkQqtsuUJvwA8A3kbnixk3qtuexex1NDJWvN",
+  "lamports": 2171520,
+  "slot": 92669965,
+  "fetchedAt": "2026-11-12T06:29:33.832Z",
+  "rpc": "https://rpc.mainnet.x1.xyz",
+  "dataBase64": "mwyq4B76zIL4owAAqYsBBYel0vwi8xO3woPjnO4VSZDI7WKauEPkjH3HzB1e0CcH1jktUVNLvhnLnb1+TLkq6eukV1M2V1vSAGXNHQAAAAAAZc0dAAAAAADKmjsAAAAAALiaPgoAAAAAyBeoBAAAAABQ1twBAAAAgLLmDgAAAADIAEMAAAAAAAAAAP4AZc0dAAAAAADKmjsAAAAAAGXNHQAAAACIE4gTiBMAAAAAAAAAAIgTCQAAAA=="
+}
