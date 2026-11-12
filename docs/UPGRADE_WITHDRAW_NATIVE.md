@@ -43,7 +43,7 @@ A deploy that fails after the buffer is written leaves the buffer funded with 2.
 1. It loads the exact `d7606fcf…` artifact as an upgradeable program at the real program id, with a locally generated upgrade authority. ProgramData data length is 403,520, as on mainnet.
 2. The old program creates a fund with metadata and takes a deposit, and the keeper runs `execute_dca`.
 3. 0.75 XNT is System-transferred to the fund PDA. The old program refuses `withdraw_native` (Anchor 101, `InstructionFallbackNotFound`).
-4. The upgrade goes as below: `program show`, then `program extend <id> 9008`, then `program deploy … --with-compute-unit-price 1000`. The dump hash after the deploy equals `a2ae4c9c…`.
+4. The upgrade goes as below: `program show`, then `program extend <id> 9008`, then `program deploy … --with-compute-unit-price 1000`. Between the extend and the deploy the old code still executes (a deposit simulates, and `withdraw_native` is still unknown). The dump hash after the deploy equals `a2ae4c9c…`.
 5. On that pre-existing fund:
    - the fund data is byte-identical across the upgrade
    - `show` reports 0.75 XNT available
