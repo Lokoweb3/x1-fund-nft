@@ -74,6 +74,14 @@ TOKENKEG="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022="TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 ATA_PROGRAM="ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 METAPLEX="metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+INS_PROGRAM="X1insUpfkQqtsuUJvwA8A3kbnixk3qtuexex1NDJWvN"
+CORE="CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+INS_CONFIG="E33orhudcHnVwA46WejnDMXZ3HCdGQaf572r2oKcy3HP"
+INS_GENESIS_POOL="6z9rZwLdrvkpj1zmgXvgi3znvu1b8rZqH4vmXY6z3TUe"
+INS_COLLECTION="8AoC9xrB7LchjfJmdUBxMcyCLjHjSQP8ZVnjDDQadDUy"
+INS_TREASURY="9TzfWeZRy2fjMaJ4o4msUjv8Q8VBL7qUqrDgbwnFxQ7b"
+INS_63="6CrbZLDfaL2qmEJ66TeiFTccUhqkniVyquGu1nWcs4WU"
+INS_63_ASSET="Aej1SC2BZbF5o5FHSu93LjspTwDjToFqBzqZeqbgTpP9"
 X1_SYSVAR_SYSCALL_EXCEPTION="CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq"
 
 # Scratch dir: required, absolute, resolved, never / or under keys/.
@@ -273,6 +281,11 @@ esac
 
 CLONES=()
 for a in "$POOL" "$AMM" "$OBS" "$VAULT_0" "$VAULT_1" "$TEST_MINT" "$AUTHORITY" "$ATA_PROGRAM"; do CLONES+=(--clone "$a"); done
+# X1 Inscriptions, as keeper/test/inscribe-e2e.sh clones it: the program,
+# Metaplex Core, and the config, genesis pool, collection and treasury that
+# inscribe touches. Plus inscription #63 and its Core asset, so the app's
+# "Check" of on-chain art can be tried locally.
+for a in "$INS_CONFIG" "$INS_GENESIS_POOL" "$INS_COLLECTION" "$INS_TREASURY" "$INS_63" "$INS_63_ASSET"; do CLONES+=(--clone "$a"); done
 start_validator -C "$CFG" --mint "$PAYER" --reset --quiet \
   --bind-address 127.0.0.1 --rpc-port "$RPC_PORT" --faucet-port "$FAUCET_PORT" \
   --gossip-port "$GOSSIP_PORT" --dynamic-port-range "$DYN_LO-$DYN_HI" \
@@ -281,6 +294,7 @@ start_validator -C "$CFG" --mint "$PAYER" --reset --quiet \
   --url "$MAINNET_RPC" \
   --clone-upgradeable-program "$TOKENKEG" --clone-upgradeable-program "$TOKEN_2022" \
   --clone-upgradeable-program "$XDEX" --clone-upgradeable-program "$METAPLEX" \
+  --clone-upgradeable-program "$INS_PROGRAM" --clone-upgradeable-program "$CORE" \
   --account "$USDC" "$USDC_FILE" \
   "${CLONES[@]}" "${FEATURE_ARGS[@]}"
 [ -n "$VALIDATOR_PID" ] || die "validator did not start"

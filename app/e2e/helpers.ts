@@ -38,11 +38,15 @@ export async function connectTo(page: Page, choice: "local" | "mainnet") {
   await expect(page.getByTestId("cluster-banner")).toHaveAttribute("data-cluster", choice === "local" ? "localnet" : "mainnet");
 }
 
-/** Wait for every simulation to pass. */
+/**
+ * Wait for every simulation to pass. A transaction that depends on an
+ * earlier one (attach_metadata) says "not simulated yet" instead.
+ */
 export async function expectSimsOk(page: Page) {
   const review = page.getByTestId("review");
   await expect(review.getByTestId("sim-status").first()).toBeVisible();
-  for (const status of await review.getByTestId("sim-status").all()) await expect(status).toHaveText("simulation ok");
+  for (const status of await review.getByTestId("sim-status").all()) await expect(status).toHaveText(/^(simulation ok|not simulated yet)$/);
+  await expect(review.getByTestId("sim-status").filter({ hasText: "FAILED" })).toHaveCount(0);
 }
 
 export async function signAndSend(page: Page) {
@@ -52,19 +56,28 @@ export async function signAndSend(page: Page) {
   await expect(page.getByTestId("send-record").first()).toHaveAttribute("data-status", "done");
 }
 
-/** Fill the create form with the 20% cash + 80% TEST basket and build the review. */
-export async function reviewCreateFund(page: Page) {
+/**
+ * Drive the Create Fund wizard: paste USDC.X as pay-with, paste TEST, check
+ * that the pool is auto-selected, 80% TEST (so 20% is kept as cash), 0.1 per
+ * buy every hour.
+ */
+export async function fillWizard(page: Page) {
   await page.getByRole("button", { name: "Create fund", exact: true }).click();
-  await page.getByLabel("Quote mint").fill(USDC);
+  await page.getByLabel("Pay-with token", { exact: true }).fill(USDC);
+  await expect(page.getByTestId("quote-input").getByTestId("mint-facts")).toContainText("USDC.X");
   await expect(page.getByTestId("fit")).toBeVisible();
-  await page.getByLabel("Cash weight").fill("2000");
-  await page.getByLabel("Target 0 mint").fill(TEST_MINT);
-  await page.getByLabel("Target 0 pool").fill(POOL);
-  await page.getByLabel("Target 0 weight").fill("8000");
-  await page.getByLabel("Per run").fill("0.1");
-  await page.getByLabel("Interval").fill("3600");
-  await page.getByLabel("TWAP window").fill("3600");
-  await page.getByLabel("Max deviation").fill("300");
+  await page.getByLabel("Token 1 to buy", { exact: true }).fill(TEST_MINT);
+  await expect(page.getByTestId("target-0-pool").getByTestId("pool-address")).toHaveText(POOL);
+  await page.getByLabel("Token 1 share").fill("80");
+  await expect(page.getByTestId("cash-share")).toContainText("keep as cash 20%");
+  await page.getByLabel("Amount per buy").fill("0.1");
+  await page.getByLabel("How often").selectOption("3600");
+}
+
+/** The wizard with no NFT metadata (2 transactions), up to a simulated review. */
+export async function reviewCreateFund(page: Page) {
+  await fillWizard(page);
+  await page.getByLabel("No metadata now").check();
   await page.getByTestId("create-review").click();
   await expect(page.getByTestId("sim")).toHaveCount(2);
 }
