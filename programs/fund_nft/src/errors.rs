@@ -104,4 +104,6 @@ pub enum FundError {
     BadMetadata,
     #[msg("Nothing to update")]
     NothingToUpdate,
+    #[msg("Token Metadata took more from the holder than the attach cost cap allows")]
+    AttachCostTooHigh,
 }

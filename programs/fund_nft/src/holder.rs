@@ -35,6 +35,7 @@ pub fn require_holder(
             account_mint: nft_account.mint,
             account_owner: nft_account.owner,
             account_amount: nft_account.amount,
+            account_program: *nft_account.to_account_info().owner,
             holder: *holder,
             nft_token_program: *nft_token_program,
         }),
@@ -54,6 +55,8 @@ pub struct HolderFacts {
     pub account_mint: Pubkey,
     pub account_owner: Pubkey,
     pub account_amount: u64,
+    /// Owner program of the holder's token account; must equal the NFT's token program.
+    pub account_program: Pubkey,
     pub holder: Pubkey,
     pub nft_token_program: Pubkey,
 }
@@ -66,6 +69,7 @@ pub fn holder_ok(f: HolderFacts) -> bool {
         && f.account_mint == f.fund_nft_mint
         && f.account_owner == f.holder
         && f.account_amount == 1
+        && f.account_program == f.nft_token_program
 }
 
 #[cfg(test)]
@@ -85,6 +89,7 @@ mod tests {
             account_mint: mint,
             account_owner: holder,
             account_amount: 1,
+            account_program: program,
             holder,
             nft_token_program: program,
         }
@@ -110,7 +115,7 @@ mod tests {
     #[test]
     fn every_other_field_is_checked() {
         let other = Pubkey::new_from_array([1u8; 32]);
-        let cases: [fn(&mut HolderFacts, Pubkey); 7] = [
+        let cases: [fn(&mut HolderFacts, Pubkey); 8] = [
             |f, o| f.mint_key = o,
             |f, _| f.mint_decimals = 1,
             |f, o| f.mint_owner = o,
@@ -118,6 +123,7 @@ mod tests {
             |f, o| f.account_owner = o,
             |f, _| f.account_amount = 2,
             |f, _| f.account_amount = 0,
+            |f, o| f.account_program = o,
         ];
         for (i, mutate) in cases.iter().enumerate() {
             let mut f = ok();

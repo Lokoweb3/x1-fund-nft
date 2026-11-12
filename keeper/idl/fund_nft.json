@@ -1065,6 +1065,11 @@
       "code": 6050,
       "name": "NothingToUpdate",
       "msg": "Nothing to update"
+    },
+    {
+      "code": 6051,
+      "name": "AttachCostTooHigh",
+      "msg": "Token Metadata took more from the holder than the attach cost cap allows"
     }
   ],
   "types": [

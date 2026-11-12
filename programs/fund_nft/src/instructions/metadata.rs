@@ -135,6 +135,7 @@ pub fn handle_attach_metadata(
     let bump_seed = [ctx.accounts.fund.bump];
     let signer: &[&[u8]] = &[FUND_SEED, nft_mint.as_ref(), &bump_seed];
     let fund_info = ctx.accounts.fund.to_account_info();
+    let holder_before = ctx.accounts.holder.lamports();
 
     metadata::create_metadata_accounts_v3(
         CpiContext::new_with_signer(
@@ -191,6 +192,13 @@ pub fn handle_attach_metadata(
             && ctx.accounts.nft_mint.freeze_authority == edition
             && ctx.accounts.nft_mint.supply == 1,
         FundError::NftMintAuthority
+    );
+    // Bound the holder's wallet exposure to Token Metadata (an upgradeable
+    // program that received the holder signer and the System Program).
+    let debit = holder_before.saturating_sub(ctx.accounts.holder.lamports());
+    require!(
+        debit <= crate::metaplex::MAX_ATTACH_DEBIT_LAMPORTS,
+        FundError::AttachCostTooHigh
     );
     emit!(MetadataAttached {
         fund: fund_key,

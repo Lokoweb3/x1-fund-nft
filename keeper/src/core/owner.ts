@@ -564,9 +564,9 @@ export function setMetadataCommandLine(input: {
     `--payer ${input.payer.toBase58()}`,
     `--rpc ${shellQuote(input.rpcUrl)}`,
   ];
-  if (input.fields.name !== undefined) parts.push(`--name ${shellQuote(input.fields.name)}`);
-  if (input.fields.symbol !== undefined) parts.push(`--symbol ${shellQuote(input.fields.symbol)}`);
-  if (input.fields.uri !== undefined) parts.push(`--uri ${shellQuote(input.fields.uri)}`);
+  if (input.fields.name !== undefined) parts.push(`--name=${shellQuote(input.fields.name)}`);
+  if (input.fields.symbol !== undefined) parts.push(`--symbol=${shellQuote(input.fields.symbol)}`);
+  if (input.fields.uri !== undefined) parts.push(`--uri=${shellQuote(input.fields.uri)}`);
   if (input.send) {
     parts.push("--send");
     if (input.cluster) parts.push(`--cluster ${input.cluster}`);

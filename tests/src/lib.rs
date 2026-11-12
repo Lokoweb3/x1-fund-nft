@@ -237,6 +237,9 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
     // swap writes a fresh observation (the pool writes one when the last is
     // at least 15 s old) and the choice is retried.
     let mut window = None;
+    // Raw USDC.X the payer spends on the fallback swap, if it runs; the
+    // payer-balance assertions below subtract it.
+    let mut fallback_spent: u64 = 0;
     for attempt in 0..2 {
         let obs = account_data(&rpc, &pubkey(OBS));
         let view = xdex::read_observation(&obs).expect("cloned observation");
@@ -262,6 +265,7 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
             ))
             .send()
             .expect("swap to write a fresh observation");
+        fallback_spent += 1_000;
     }
     let window = window.unwrap_or_else(|| {
         panic!(
@@ -517,7 +521,11 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
     assert_eq!(token_amount(&account_data(&rpc, &quote_vault)), 600_000);
     // The tip is 400 raw USDC, paid back to the caller. Started at 2_000_000,
     // deposited 1_000_000, so 1_000_000 remained, plus the 400 tip.
-    assert_eq!(token_amount(&account_data(&rpc, &payer_usdc)), 1_000_400);
+    assert_eq!(
+        token_amount(&account_data(&rpc, &payer_usdc)),
+        1_000_400 - fallback_spent,
+        "payer USDC.X after deposit and tip (fallback swap spent {fallback_spent})"
+    );
 
     // sha256("event:DcaExecuted")[..8], the tag Anchor writes for this event.
     let min_out = match min_out_from_chain(&rpc, &sig) {

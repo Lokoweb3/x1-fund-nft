@@ -236,9 +236,9 @@ test("set-metadata recovery command quotes the fields and keeps the key a placeh
     fields: { name: "Bob's fund", symbol: "BF", uri: "https://example.invalid/x.json?a=1&b=2" },
   });
   assert.match(line, /^KEYPAIR='REPLACE_WITH_THE_SAME_KEYPAIR_PATH' npx tsx src\/cli\.ts set-metadata /);
-  assert.match(line, /--name 'Bob'\\''s fund'/);
-  assert.match(line, /--symbol BF /);
-  assert.match(line, /--uri 'https:\/\/example\.invalid\/x\.json\?a=1&b=2'/);
+  assert.match(line, /--name='Bob'\\''s fund'/);
+  assert.match(line, /--symbol=BF /);
+  assert.match(line, /--uri='https:\/\/example\.invalid\/x\.json\?a=1&b=2'/);
   assert.match(line, /--send --cluster localnet$/);
 
   // Partial failure after tx 1: both recovery commands are shown.

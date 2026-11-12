@@ -12,8 +12,8 @@ Review status: independent dual review. The lead and Codex reviewed separately o
 | --- | --- |
 | Program ID | `6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM` (keypair `keys/fund_nft-mainnet.json`, owner-held, gitignored) |
 | Build | `anchor build --ignore-keys --arch v0` with Anchor 1.2.2, Agave 4.1.2, platform-tools v1.57, Rust 1.89.0 |
-| Artifact | `target/deploy/fund_nft.so`, 398,960 bytes, SBPF v0 (ELF e_flags 0), no `sol_get_sysvar` import |
-| sha256 | `94a44e059f32c67e06d47a27ecb77fec16a3f00d7552a2b4dd6e0e00e6e28016` (lead build with the NFT supply==1 holder check, 2026-11-12; rebuild and compare) |
+| Artifact | `target/deploy/fund_nft.so`, 400,536 bytes, SBPF v0 (ELF e_flags 0), no `sol_get_sysvar` import |
+| sha256 | `757282ba96f61e55dee94e669e69126b195327f82aab81c9030889a020a7eeb0` (lead build with the attach debit cap and holder account-program check, 2026-11-12; rebuild and compare) |
 | XDEX program allowed | `sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN` (default build, no `testnet` feature) |
 | Token Metadata allowed | `metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s` (both builds) |
 
@@ -24,7 +24,7 @@ Why v0: X1 mainnet has SBPF v1 and v3 deployment inactive. Anchor 1.2.2 defaults
 ## Cost
 
 Rent on mainnet, read on 2026-11-12:
-- program data, 399,005 bytes: **2.7780 XNT**, locked for the life of the program (was 2.1737 XNT at 312,181 bytes)
+- program data, 400,581 bytes: **2.7889 XNT**, locked for the life of the program (was 2.1737 XNT at 312,181 bytes)
 - program account: 0.0011 XNT
 
 During the deploy a temporary buffer of the same size is also funded. It is refunded when the deploy finishes. Hold about **6 XNT** in the deployer wallet.
@@ -118,19 +118,28 @@ npx tsx src/cli.ts create-fund --quote "$USDC" \
 #    transactions and the NFT has no metadata until step 2a.
 # REPLACE the uri with your hosted metadata JSON (name, symbol, image, ...).
 NFT_URI='https://REPLACE_WITH_YOUR_HOST/fund-nft.json'
+NFT_NAME='X1 Fund NFT'   # at most 32 bytes
+NFT_SYMBOL='XFUND'       # at most 10 bytes
 KEYPAIR="$OWNER_KEYPAIR" npx tsx src/cli.ts create-fund --quote "$USDC" \
   --target "$USDC:default:2000" --target "$TEST:$POOL:8000" \
   --per-run 100000 --interval 3600 --window 3600 --max-dev-bps 300 \
-  --name 'X1 Fund NFT' --symbol 'XFUND' --uri "$NFT_URI" \
+  --name="$NFT_NAME" --symbol="$NFT_SYMBOL" --uri="$NFT_URI" \
   --payer "$OWNER" "${SEND[@]}"
 # REPLACE with the fund PDA printed above.
 FUND='REPLACE_WITH_FUND_PDA'
 
-# 2a. Attach or change the NFT metadata (NFT holder only). With no metadata
-#     yet it needs all three fields; otherwise give only what changes.
-npx tsx src/cli.ts set-metadata --fund "$FUND" --uri "$NFT_URI" --payer "$OWNER"
-KEYPAIR="$OWNER_KEYPAIR" npx tsx src/cli.ts set-metadata --fund "$FUND" --uri "$NFT_URI" \
-  --payer "$OWNER" "${SEND[@]}"
+# 2a. Attach the NFT metadata (NFT holder only). Use this when the fund was
+#     created without metadata or its attach transaction failed. Attaching
+#     needs all three fields. Attach debits the holder about 0.016 XNT; the
+#     program refuses any attach that takes more than 0.03 XNT.
+npx tsx src/cli.ts set-metadata --fund "$FUND" \
+  --name="$NFT_NAME" --symbol="$NFT_SYMBOL" --uri="$NFT_URI" --payer "$OWNER"
+KEYPAIR="$OWNER_KEYPAIR" npx tsx src/cli.ts set-metadata --fund "$FUND" \
+  --name="$NFT_NAME" --symbol="$NFT_SYMBOL" --uri="$NFT_URI" --payer "$OWNER" "${SEND[@]}"
+
+# 2a'. Change existing metadata later: give only the fields that change.
+KEYPAIR="$OWNER_KEYPAIR" npx tsx src/cli.ts set-metadata --fund "$FUND" \
+  --uri="$NFT_URI" --payer "$OWNER" "${SEND[@]}"
 
 # 2b. Create any missing quote/target vault ATAs. Idempotent: if step 2
 #     completed it only reports that every vault exists.
@@ -166,7 +175,7 @@ Before the deploy, step 1 fails with `program 6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG1
 - **Upgrade authority.** The deployer key can replace the program, including with code that moves every vault. Before outside users deposit, move it to a multisig, or freeze it (see the freeze section above, which is irreversible).
 - **Token issuers.** The mint-extension allowlist blocks permanent delegates, hooks and similar extensions. It does not remove ordinary issuer power. A mint's freeze authority can freeze a fund's vault, and its mint authority can inflate supply. A Token-2022 transfer-fee authority can change both the fee rate and its maximum-fee cap for future epochs (taking effect two epochs after the change), potentially charging 100% of a transfer. The current fee cap is not a permanent protection. Check these authorities on each mint you put in a fund.
 - **Token programs.** X1 Token-2022 (`TokenzQd…`) is upgradeable, with authority `2sXr5THr5ZAwSfuJAc1KogPKZ2uKkhfNUAtEvNw5Q6Z7` (read on 2026-11-12). Its upgrade key can change how every Token-2022 vault behaves. The program allowlists that ID, not its code. Classic Tokenkeg is frozen (no upgrade authority), and the ATA program is on the non-upgradeable loader.
-- **Token Metadata.** `metaqbxx…` is upgradeable (authority `X1TMEC99KMa4MGEKfcrSJ6HZTiwvPVyrwQczZjuCoLV`, read on 2026-11-12). After `attach_metadata` its edition PDA holds the NFT's mint and freeze authority. Its upgrade key can change the displayed metadata, freeze the NFT (that blocks NFT transfers, not withdrawals), or mint another NFT unit. An extra unit cannot withdraw anything, because every holder action requires the NFT's total supply to be exactly 1, but it would block withdrawals until the extra unit is burned. It never receives a vault or a fund-PDA signature over one. See `ASSUMPTIONS.md` "Design risks".
+- **Token Metadata.** `metaqbxx…` is upgradeable (authority `X1TMEC99KMa4MGEKfcrSJ6HZTiwvPVyrwQczZjuCoLV`, read on 2026-11-12). After `attach_metadata` its edition PDA holds the NFT's mint and freeze authority. Its upgrade key can change the displayed metadata, freeze the NFT (that blocks NFT transfers, not withdrawals), or mint another NFT unit. An extra unit cannot withdraw anything, because every holder action requires the NFT's total supply to be exactly 1, but it would block withdrawals until the extra unit is burned. It never receives a vault or a fund-PDA signature over one. At attach it does receive the holder as fee payer; the program refuses any attach that debits the holder more than 0.03 XNT (honest cost about 0.016 XNT). See `ASSUMPTIONS.md` "Design risks".
 - **XDEX.** XDEX's own upgrade authority (`cveZ26DWAWDQb3jUubHmdEM3GxvYt6gqfxdxD2ASNNY` on 2026-11-11) can forge the price observations this program reads. Over successive cranks that could consume every fund's scheduled quote budget. No check in this program removes that risk.
 - **Not an X1 rehearsal.** The integration test runs on Agave 4.1.2 with X1's inactive features turned off, except `X1_SYSVAR_SYSCALL_EXCEPTION`, and with X1's real Token, Token-2022 and ATA programs cloned. That is close to X1 but not X1 itself. The canary is the first run on X1.
 - **Reverse direction.** A fund whose quote mint is token 1 in its pool is covered only by unit tests. Watch its first crank.

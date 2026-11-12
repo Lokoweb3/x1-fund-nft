@@ -17,6 +17,14 @@ pub const METAPLEX_PROGRAM_ID: Pubkey = pubkey!("metaqbxxUerdq28cj1RbAWkYQm3ybzj
 
 /// Token Metadata limits, in bytes (`MAX_NAME_LENGTH`, `MAX_SYMBOL_LENGTH`,
 /// `MAX_URI_LENGTH`).
+/// Most `attach_metadata` may debit the holder, in lamports (0.03 XNT).
+/// Measured honest cost on the cloned X1 Token Metadata program on
+/// 2026-11-12: 16,145,680 lamports (metadata 15,115,600 incl. the 0.01 XNT
+/// creation fee, plus edition 1,030,080). The holder signer and the System
+/// Program are forwarded to the upgradeable Token Metadata program, so this
+/// cap bounds what a malicious upgrade could take from the holder's wallet.
+pub const MAX_ATTACH_DEBIT_LAMPORTS: u64 = 30_000_000;
+
 pub const MAX_NAME_LEN: usize = 32;
 pub const MAX_SYMBOL_LEN: usize = 10;
 pub const MAX_URI_LEN: usize = 200;
@@ -80,6 +88,16 @@ pub fn trim_nul(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::MAX_ATTACH_DEBIT_LAMPORTS;
+
+    #[test]
+    fn attach_cost_cap_covers_the_honest_cost_and_little_more() {
+        // Measured on the cloned X1 Token Metadata program (2026-11-12).
+        let honest: u64 = 15_115_600 + 1_030_080;
+        assert!(MAX_ATTACH_DEBIT_LAMPORTS >= honest * 3 / 2, "headroom for rent changes");
+        assert!(MAX_ATTACH_DEBIT_LAMPORTS <= 50_000_000, "cap stays small (0.05 XNT)");
+    }
+
     use super::*;
 
     fn code(result: Result<()>) -> u32 {
