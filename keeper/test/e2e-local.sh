@@ -75,7 +75,7 @@ echo "work dir: $WORK"
 
 VALIDATOR_PID=""
 cleanup() {
-  if [ -n "$VALIDATOR_PID" ]; then kill "$VALIDATOR_PID" 2>/dev/null; wait "$VALIDATOR_PID" 2>/dev/null; fi
+  stop_validator
   if [ "${E2E_KEEP:-0}" = 1 ]; then
     echo "kept $WORK"
   else
@@ -108,7 +108,32 @@ sol_exec() {
 }
 solana() { require_cfg solana "$@"; sol_exec solana "$@"; }
 spl-token() { require_cfg spl-token "$@"; sol_exec spl-token "$@"; }
-solana-test-validator() { require_cfg solana-test-validator "$@"; sol_exec solana-test-validator "$@"; }
+# The validator is NOT a wrapper function run with `&`: then $! would be the
+# backgrounded function's subshell and killing it would leave the real
+# validator on the ports. start_validator checks -C "$CFG" like the other
+# wrappers, then a dedicated background subshell `exec`s the real binary with
+# the isolated HOME/XDG, so $! is the validator's own pid.
+start_validator() {
+  require_cfg solana-test-validator "$@"
+  [ -z "$VALIDATOR_PID" ] || die "a validator is already running (pid $VALIDATOR_PID)"
+  (HOME="$SOL_HOME" XDG_CONFIG_HOME="$SOL_HOME/.config" exec "$SOLANA_BIN_DIR/solana-test-validator" "$@") \
+    </dev/null >"$WORK/validator.log" 2>&1 &
+  VALIDATOR_PID=$!
+}
+# SIGTERM, wait up to 15 s (a zombie counts as gone), then SIGKILL; always reap.
+stop_validator() {
+  [ -n "$VALIDATOR_PID" ] || return 0
+  kill -TERM "$VALIDATOR_PID" 2>/dev/null
+  local state
+  for _ in $(seq 1 150); do
+    state="$(ps -o stat= -p "$VALIDATOR_PID" 2>/dev/null)" || break
+    case "$state" in Z*|"") break ;; esac
+    sleep 0.1
+  done
+  kill -KILL "$VALIDATOR_PID" 2>/dev/null
+  wait "$VALIDATOR_PID" 2>/dev/null
+  VALIDATOR_PID=""
+}
 # solana-keygen here only writes `-o $WORK/...` or reads a $WORK file by path.
 solana-keygen() {
   case "$*" in *"$WORK"/*) ;; *) die "solana-keygen must name a file under \$WORK: $*" ;; esac
@@ -185,7 +210,7 @@ CLONES=()
 for a in "$POOL" "$AMM" "$OBS" "$VAULT_0" "$VAULT_1" "$TEST_MINT" "$AUTHORITY" "$ATA_PROGRAM"; do CLONES+=(--clone "$a"); done
 # --mint names the faucet/mint pubkey explicitly, so the validator never
 # derives it from a default keypair file.
-solana-test-validator -C "$CFG" --mint "$PAYER" --reset --quiet \
+start_validator -C "$CFG" --mint "$PAYER" --reset --quiet \
   --bind-address 127.0.0.1 --rpc-port "$RPC_PORT" --faucet-port "$FAUCET_PORT" \
   --gossip-port "$GOSSIP_PORT" --dynamic-port-range "$DYN_LO-$DYN_HI" \
   --ledger "$WORK/ledger" \
@@ -194,8 +219,8 @@ solana-test-validator -C "$CFG" --mint "$PAYER" --reset --quiet \
   --clone-upgradeable-program "$TOKENKEG" --clone-upgradeable-program "$TOKEN_2022" \
   --clone-upgradeable-program "$XDEX" \
   --account "$USDC" "$USDC_FILE" \
-  "${CLONES[@]}" "${FEATURE_ARGS[@]}" >"$WORK/validator.log" 2>&1 &
-VALIDATOR_PID=$!
+  "${CLONES[@]}" "${FEATURE_ARGS[@]}"
+[ -n "$VALIDATOR_PID" ] || die "validator did not start"
 
 for _ in $(seq 1 240); do
   kill -0 "$VALIDATOR_PID" 2>/dev/null || { tail -40 "$WORK/validator.log"; die "validator exited"; }
