@@ -9,6 +9,8 @@ Nothing else changes:
 - `withdraw_native` touches no vault, budget, target or fund field
 - live funds created by the current program keep working; the rehearsal below checks this on a fund created before the upgrade
 
+**When to upgrade.** On 2026-11-12 the fund `AQL1ACxyMnRhMb9r4iN2C4k2SESvRsmA1W2JjsTeubt9` held exactly its rent-exempt minimum: 6,145,680 lamports, so 0 XNT was available. No reflection had reached the fund PDA yet. The upgrade is only useful once XNT arrives there. There is no rush. XNT that arrives before the upgrade stays on the fund account and becomes withdrawable after it, as the rehearsal shows.
+
 ## What gets deployed
 
 | Item | Value |
@@ -35,7 +37,7 @@ The rent figures are mainnet `getMinimumBalanceForRentExemption` results, read o
 
 Peak need during the deploy is the extend rent plus the buffer plus fees, about **2.937 XNT**. Hold at least **3.5 XNT** in `DEPLOYER`. After a successful deploy, `DEPLOYER` is about 0.065 XNT lighter.
 
-A deploy that fails after the buffer is written leaves the buffer funded with 2.8723 XNT. Close it to get the XNT back; see step 5.
+A deploy that fails after the buffer is written leaves the buffer funded with 2.8723 XNT. Close it to get the XNT back; see "If `apply` stops part-way".
 
 ## Rehearsal (local, done before this runbook)
 
@@ -43,7 +45,12 @@ A deploy that fails after the buffer is written leaves the buffer funded with 2.
 1. It loads the exact `d7606fcf…` artifact as an upgradeable program at the real program id, with a locally generated upgrade authority. ProgramData data length is 403,520, as on mainnet.
 2. The old program creates a fund with metadata and takes a deposit, and the keeper runs `execute_dca`.
 3. 0.75 XNT is System-transferred to the fund PDA. The old program refuses `withdraw_native` (Anchor 101, `InstructionFallbackNotFound`).
-4. The upgrade goes as below: `program show`, then `program extend <id> 9008`, then `program deploy … --with-compute-unit-price 1000`. Between the extend and the deploy the old code still executes (a deposit simulates, and `withdraw_native` is still unknown). The dump hash after the deploy equals `a2ae4c9c…`.
+4. The upgrade runs through `scripts/upgrade-withdraw-native.sh` in its local mode, the same `check` and `apply` the owner runs:
+   - `check` with the wrong key fails, and `apply` without `--i-understand-mainnet` is refused.
+   - On a third instance, `apply` from 403,520 bytes extends by 9,008 and deploys, and a second `apply` is a no-op.
+   - On the real id, `check` deletes and rebuilds the artifact, sends nothing, and reports "extend by 9008".
+   - Then a manual `program extend` simulates an earlier run that stopped after the extend. The old code still executes in that state: a deposit simulates, and `withdraw_native` is still unknown.
+   - `apply` then sees "already extended", deploys without extending again, and asserts the dumped hash `a2ae4c9c…`. A further `apply` reports "already upgraded; nothing sent".
 5. On that pre-existing fund:
    - the fund data is byte-identical across the upgrade
    - `show` reports 0.75 XNT available
@@ -53,86 +60,90 @@ A deploy that fails after the buffer is written leaves the buffer funded with 2.
 
 Also checked:
 - `solana program deploy` in Agave 4.1.2 **auto-extends** ProgramData when it is too small. On a second instance with no `extend`, it grew 403,520 to 412,528 bytes. The authority paid the rent delta plus fees, 64,750,680 lamports.
-- With `--no-auto-extend` and no `extend`, the deploy is refused ("ProgramData account not large enough"). The old program stays in place, but **the funded buffer is left behind**. The recovery in step 5 closes it.
+- With `--no-auto-extend` and no `extend`, the deploy is refused ("ProgramData account not large enough"). The old program stays in place, but **the funded buffer is left behind**. The rehearsal closes it with the recovery commands below.
 
-Run it yourself (about 6 minutes; it builds `acb6953` from `git archive` in its own scratch dir):
+Run it yourself (about 10 minutes; it builds `acb6953` from `git archive` in its own scratch dir):
 
 ```sh
-cd ~/X1_PROJECTS/X1_FundNFT     # on branch withdraw-native, after the build in step 1
+cd ~/X1_PROJECTS/X1_FundNFT     # the reviewed commit, after target/deploy/fund_nft.so is built
 REHEARSE_SCRATCH=/tmp/fund-rehearsal \
   EXPECT_NEW_SHA=a2ae4c9cedeb413a274dd93c7afb095ad88a6082d40f4f0aad4a53f7cab13388 \
   bash scripts/rehearse-upgrade-local.sh
-# last line: upgrade rehearsal: 64 passed, 0 failed (...)
+# last line: upgrade rehearsal: 89 passed, 0 failed (...)
 ```
 
 ## Steps
 
+Run the upgrade with `scripts/upgrade-withdraw-native.sh`. It fails closed: every check is an assertion, and `apply` reruns all of them before it spends anything. It runs in its own process, so a failure never exits your shell. It reads the keypair only by path, through `solana-keygen pubkey` and as the signer. It uses its own temporary solana config, so `~/.config/solana` is not consulted.
+
 ```sh
-cd ~/X1_PROJECTS/X1_FundNFT
+cd ~/X1_PROJECTS/X1_FundNFT      # a checkout of the reviewed commit
+git fetch && git checkout <REVIEWED_COMMIT>
+# REPLACE: the absolute path to the upgrade-authority keypair (pubkey HffqrD7V3SK5e15cALv2tJAZKUJN2FGrxBq72kvnmWGj).
+export DEPLOYER='/absolute/path/to/deployer.json'
+# REPLACE: the commit the lead names as reviewed.
+export EXPECT_COMMIT='<REVIEWED_COMMIT>'
+
+# 1. check (read-only; about 2 minutes, mostly the build).
+bash scripts/upgrade-withdraw-native.sh check
+```
+
+`check` asserts each of the following, and exits non-zero on any failure:
+- Agave 4.1.2 and Anchor 1.2.2.
+- `HEAD` is `EXPECT_COMMIT`, and the build inputs (`programs/`, `Cargo.*`, `Anchor.toml`, `rust-toolchain.toml`) have no local changes.
+- It deletes `target/deploy/fund_nft.so` and builds again. The fresh artifact must be 412,528 bytes with sha256 `a2ae4c9c…`, ELF e_flags 0, and no `sol_get_sysvar` import.
+- The RPC genesis hash is X1 mainnet's, `4SvBP3…`.
+- `solana-keygen pubkey "$DEPLOYER"` and the program's on-chain upgrade authority are both `HffqrD7V…`.
+- ProgramData has one of two data lengths. At 403,520 it plans "extend by 9008, then deploy". At 412,528 it reports one of two states:
+  - "already extended, not yet deployed", when an earlier run stopped after the extend
+  - "already upgraded: nothing to do"
+  Any other length is refused.
+- Leftover buffers owned by the authority are listed with their close commands. This is a warning, not a failure.
+- The `DEPLOYER` balance covers: extend rent (if needed) + temporary buffer rent + a 0.05 XNT fee margin. All rent values come from `getMinimumBalanceForRentExemption`. From 403,520 bytes this is 2,985,038,960 lamports, about 2.99 XNT.
+
+Read the whole output. The last line must be `check: N passed, 0 failed (state: extend)`.
+
+```sh
+# 2. apply (spends XNT, upgrades the program). Reruns step 1, extends only
+#    from 403,520 bytes, deploys with --with-compute-unit-price 1000, then
+#    dumps the program and asserts the on-chain hash and the authority.
+bash scripts/upgrade-withdraw-native.sh apply --i-understand-mainnet
+# last line: apply: upgraded 6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM to a2ae4c9c...
+```
+
+If `apply` stops part-way:
+- **It stopped after the extend.** Rerun `apply`. It sees 412,528 bytes and deploys without extending again.
+- **The deploy failed.** The old program stays live, and `apply` prints the recovery commands. The buffer keeps its 2.8723 XNT. Either resume it with the 12-word phrase the CLI printed (`solana-keygen recover`, then `solana program deploy --buffer …`), or close it with `solana program close <BUFFER> --keypair "$DEPLOYER" --url https://rpc.mainnet.x1.xyz` and rerun `apply`.
+- **Rerunning after a finished upgrade** prints "already upgraded; nothing sent".
+
+## Appendix: the manual commands `apply` runs
+
+These are for reference only. Run the script instead; these lines don't check anything themselves.
+
+```sh
 export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
 URL='https://rpc.mainnet.x1.xyz'
 PROGRAM_ID='6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM'
-AUTHORITY='HffqrD7V3SK5e15cALv2tJAZKUJN2FGrxBq72kvnmWGj'
-# REPLACE the path below with the absolute path to the upgrade-authority keypair.
-DEPLOYER='/absolute/path/to/deployer.json'
-test -f "$DEPLOYER" || echo "DEPLOYER is not a file: fix it before continuing"
-
-# 1. Build the reviewed commit and compare the hash with the table above.
-git status --short                      # must be clean
-git rev-parse --abbrev-ref HEAD         # withdraw-native (or main after it is merged)
-~/.avm/bin/anchor-1.2.2 build --ignore-keys --arch v0
-stat -c %s target/deploy/fund_nft.so    # 412528
-sha256sum target/deploy/fund_nft.so     # a2ae4c9cedeb413a274dd93c7afb095ad88a6082d40f4f0aad4a53f7cab13388
-strings target/deploy/fund_nft.so | grep sol_get_sysvar   # must print nothing
-
-# 2. Check the network, the authority and the balance.
-solana genesis-hash --url "$URL"                  # must be 4SvBP3omtvcCVWdxq1zBY5cDp4wndjsThb6nEMn6iMdN
-solana-keygen pubkey "$DEPLOYER"                  # must be $AUTHORITY
-solana balance --keypair "$DEPLOYER" --url "$URL" # >= 3.5 XNT
-solana program show "$PROGRAM_ID" --url "$URL"
-#   Authority: HffqrD7V3SK5e15cALv2tJAZKUJN2FGrxBq72kvnmWGj
-#   ProgramData Address: p1AjEzTvg3uCskJZ2XxtgzQ9o9KmGPDcJz8LxaEwXkv
-#   Data Length: 403520 (0x62840) bytes
-solana program show --buffers --keypair "$DEPLOYER" --url "$URL"   # note any old buffers
-
-# 3. Extend ProgramData by exactly new length - current length.
-#    9008 = 412528 - 403520. Recompute if step 2 showed another Data Length.
-#    This locks 0.0627 XNT of rent. The old code keeps running until step 4.
-solana program extend "$PROGRAM_ID" 9008 --keypair "$DEPLOYER" --url "$URL"
-solana program show "$PROGRAM_ID" --url "$URL"   # Data Length: 412528 (0x64b70) bytes
-
-# 4. Deploy (upgrade). Without step 3 this would auto-extend anyway (Agave
-#    4.1.2 default); the explicit extend keeps the rent change visible.
-solana program deploy target/deploy/fund_nft.so \
-  --program-id "$PROGRAM_ID" \
-  --keypair "$DEPLOYER" --upgrade-authority "$DEPLOYER" \
-  --url "$URL" --with-compute-unit-price 1000
-
-# 5. Only if step 4 stopped part-way. The buffer keeps its 2.8723 XNT. Either
-#    resume: recover the buffer keypair from the 12-word phrase the CLI
-#    printed, then deploy again with --buffer:
-#      solana-keygen recover -o /absolute/path/buffer.json
-#      solana program deploy target/deploy/fund_nft.so --buffer /absolute/path/buffer.json \
-#        --program-id "$PROGRAM_ID" --keypair "$DEPLOYER" --upgrade-authority "$DEPLOYER" \
-#        --url "$URL" --with-compute-unit-price 1000
-#    or give up and get the XNT back:
-#      solana program show --buffers --keypair "$DEPLOYER" --url "$URL"
-#      solana program close <BUFFER> --keypair "$DEPLOYER" --url "$URL"
-#    The old program keeps running until a deploy completes.
-
-# 6. Verify on chain.
-solana program show "$PROGRAM_ID" --url "$URL"
-#   Authority must still be $AUTHORITY; Data Length 412528; Last Deployed In Slot is new
+solana genesis-hash --url "$URL"                 # 4SvBP3omtvcCVWdxq1zBY5cDp4wndjsThb6nEMn6iMdN
+solana-keygen pubkey "$DEPLOYER"                 # HffqrD7V3SK5e15cALv2tJAZKUJN2FGrxBq72kvnmWGj
+solana program show "$PROGRAM_ID" --url "$URL"   # Authority HffqrD7V...; Data Length: 403520 (0x62840) bytes
+solana program show --buffers --buffer-authority HffqrD7V3SK5e15cALv2tJAZKUJN2FGrxBq72kvnmWGj --url "$URL"
+solana program extend "$PROGRAM_ID" 9008 --keypair "$DEPLOYER" --url "$URL"   # 412528 - 403520; locks 0.0627 XNT
+solana program deploy target/deploy/fund_nft.so --program-id "$PROGRAM_ID" \
+  --keypair "$DEPLOYER" --upgrade-authority "$DEPLOYER" --url "$URL" --with-compute-unit-price 1000
 solana program dump "$PROGRAM_ID" /tmp/fund_nft-onchain.so --url "$URL"
-sha256sum /tmp/fund_nft-onchain.so target/deploy/fund_nft.so   # both a2ae4c9c...
-solana program show --buffers --keypair "$DEPLOYER" --url "$URL"   # no new buffer left
+sha256sum /tmp/fund_nft-onchain.so               # a2ae4c9cedeb413a274dd93c7afb095ad88a6082d40f4f0aad4a53f7cab13388
 ```
+
+Without the extend, Agave 4.1.2's `program deploy` would auto-extend, as the rehearsal showed. `apply` extends explicitly so the rent change is visible and checked.
 
 ## First withdraw-native on mainnet
 
-The fund `AQL1ACxyMnRhMb9r4iN2C4k2SESvRsmA1W2JjsTeubt9` holds Test and receives the reflections. The command simulates first and loads no keypair. Read the summary before you add the send flags. `--amount all` is the Fund account's lamports minus the rent-exempt minimum for its data length. Every Fund account is 755 bytes (space for 8 targets), and that minimum is 6,145,680 lamports.
+**The owner's fund NFT is in X1 Wallet, which has no keypair file, so the CLI cannot sign for it.** Use the web app's "Withdraw native XNT" action on the fund page. That action is being added on another branch. Like the other app actions, it simulates first and shows a review before Sign & send. The CLI steps below are for holders whose NFT sits in a keypair-file wallet. Their `show` and simulate-only steps also work for anyone, with no key.
 
-As of a read on 2026-11-12, this fund held exactly 6,145,680 lamports: its rent minimum, so 0 XNT was available. No reflection had reached the PDA yet. Until XNT arrives, `--amount all` stops client-side with "has no native XNT above its rent-exempt minimum". Check with `show` first.
+The fund `AQL1ACxyMnRhMb9r4iN2C4k2SESvRsmA1W2JjsTeubt9` holds Test and receives the reflections. `--amount all` is the Fund account's lamports minus the rent-exempt minimum for its data length. Every Fund account is 755 bytes (space for 8 targets), and that minimum is 6,145,680 lamports.
+
+As of 2026-11-12 the fund held exactly that minimum, so 0 XNT was available (see "When to upgrade"). Until XNT arrives, `--amount all` stops client-side with "has no native XNT above its rent-exempt minimum". Check with `show` first.
 
 ```sh
 cd ~/X1_PROJECTS/X1_FundNFT/keeper
@@ -161,7 +172,12 @@ KEYPAIR="$OWNER_KEYPAIR" npx tsx src/cli.ts withdraw-native --fund "$FUND" --amo
 npx tsx src/cli.ts show --fund "$FUND"
 ```
 
-`--amount <lamports>` takes a raw amount; 1 XNT is 1,000,000,000. The CLI refuses an amount above what is available, and so does the program (`NativeAboveAvailable`, 6054). It also refuses `all` when the balance is too large for a JS number to hold exactly, above about 9,007,199 XNT; pass raw lamports then.
+`--amount <lamports>` takes a raw amount; 1 XNT is 1,000,000,000. The CLI refuses an amount above what is available, and so does the program (`NativeAboveAvailable`, 6054).
+
+Above 2^53 − 1 lamports (about 9,007,199 XNT), a JS number can't hold the balance exactly:
+- `show` prints "balance too large to display exactly"
+- `--amount all` is refused
+- an explicit `--amount <lamports>` is sent without the client-side check, and the program still enforces the rent floor
 
 ## Trust notes
 
