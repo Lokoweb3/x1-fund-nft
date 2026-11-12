@@ -323,57 +323,33 @@ test("NFT art from inscription #63 (Check), JSON inscribed on localnet, then cre
   expect(disallowed).toEqual([]);
 });
 
-test("an inscription upload cut off mid-way: Resume offered, then disabled with an explanation after a reload", async ({ page }) => {
+test("a JSON over 600 bytes cannot be inscribed: Inscribe on X1 is disabled with the reason", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  // Let the first sendTransaction through and drop the second one in the
-  // browser, so its status is unknown (it never reaches the validator).
-  let sends = 0;
-  await page.route(/^http:\/\/127\.0\.0\.1:\d+\/?$/, async (route) => {
-    const body = route.request().postData() ?? "";
-    if (route.request().method() === "POST" && body.includes('"sendTransaction"') && ++sends === 2) return route.abort("connectionreset");
-    return route.continue();
-  });
-
   await page.goto("/");
   await connectTo(page, "local");
   await page.getByTestId("use-test-wallet").click();
-  const pubkey = (await page.getByTestId("signer-pubkey").textContent())!.trim();
-  expect(await fundWallet(pubkey)).toContain("+1000 USDC.X");
   await fillWizard(page);
-  await page.getByLabel("NFT name").fill("Resume Fund");
-  await page.getByLabel("NFT symbol").fill("RFUND");
-  await page.getByLabel("NFT description").fill("A description long enough that the JSON needs two inscription transactions. ".repeat(8));
+  await page.getByLabel("NFT name").fill("Large Fund");
+  await page.getByLabel("NFT symbol").fill("LFUND");
+  await page.getByLabel("NFT description").fill("A description long enough that the JSON needs more than one inscription transaction. ".repeat(8));
   await page.getByLabel("Image URL").fill("https://example.com/fund.png");
+  // Compact (the default) fits one transaction: Inscribe is available.
+  await expect(page.getByTestId("json-bytes")).toBeVisible();
+  await expect(page.getByLabel("Inscribe on X1")).toBeEnabled();
+  await expect(page.getByTestId("inscribe-too-large")).toHaveCount(0);
+  // Without Compact the JSON is over 600 bytes: Inscribe is disabled, with the reason.
   await page.getByLabel("Compact JSON").uncheck();
-  await page.getByLabel("Inscribe on X1").check();
-  await expect(page.getByTestId("inscribe-estimate")).toContainText("2 transactions");
-  await page.getByTestId("inscribe-review").click();
-  const insReview = page.getByTestId("review").filter({ hasText: "Review: Inscribe metadata" });
-  await expect(insReview.getByTestId("sim-status").first()).toHaveText("simulation ok");
-  await insReview.getByTestId("sign-and-send").click();
-  const rec = page.getByTestId("send-record").first();
-  await expect(rec).toHaveAttribute("data-status", "failed");
-  await expect(rec.getByTestId("send-failed")).toContainText("status is unknown");
-  // In this page the registry holds both transactions: Resume is offered.
-  await expect(page.getByTestId("inscribe-resume")).toBeVisible();
-  await expect(page.getByTestId("inscribe-resume-section")).toContainText("2 earlier transactions");
-
-  // After a reload the history is gone: Resume is disabled and says what to do.
-  await page.reload();
-  await connectTo(page, "local");
-  await page.getByTestId("use-test-wallet").click();
-  await page.getByRole("button", { name: "Create fund", exact: true }).click();
-  const blocked = page.getByTestId("resume-blocked");
-  await expect(blocked).toBeVisible();
-  await expect(blocked.getByTestId("inscribe-resume-disabled")).toBeDisabled();
-  await expect(blocked).toContainText("before the page was reloaded");
-  await expect(blocked).toContainText("wait until every earlier transaction of this upload has confirmed or expired");
-  await expect(blocked).toContainText("start a fresh inscription");
-  await expect(page.getByTestId("inscribe-resume")).toHaveCount(0);
-  // Hiding the note never enables a resume.
-  await blocked.getByTestId("forget-resume-note").click();
-  await expect(page.getByTestId("resume-blocked")).toHaveCount(0);
-  await expect(page.getByTestId("inscribe-resume")).toHaveCount(0);
+  const bytes = Number(/(\d+) bytes/.exec((await page.getByTestId("json-bytes").textContent())!)![1]);
+  expect(bytes).toBeGreaterThan(600);
+  await expect(page.getByLabel("Inscribe on X1")).toBeDisabled();
+  await expect(page.getByTestId("inscribe-too-large")).toHaveText(
+    `Too large to inscribe in one transaction (${bytes} bytes, max 600). Turn on Compact, shorten the description, or use Upload/Paste link.`,
+  );
+  await expect(page.getByTestId("inscribe-review")).toHaveCount(0);
+  // Turning Compact back on brings it back.
+  await page.getByLabel("Compact JSON").check();
+  await expect(page.getByLabel("Inscribe on X1")).toBeEnabled();
+  await expect(page.getByTestId("inscribe-too-large")).toHaveCount(0);
   expect(errors).toEqual([]);
 });

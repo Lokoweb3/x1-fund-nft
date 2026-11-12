@@ -10,7 +10,6 @@ import type { AppState, Unresolved } from "../src/App.js";
 import { ReviewPanel } from "../src/components/ReviewPanel.js";
 import type { Review } from "../src/lib/actions.js";
 import type { SendRecord } from "../src/components/SendLog.js";
-import { InscriptionRegistry } from "../src/lib/inscriptions.js";
 import { createLocalTestWallet } from "../src/lib/signer.js";
 import { signerId } from "../src/lib/session.js";
 
@@ -60,8 +59,6 @@ function state(opts: { attempted?: number[]; sends?: SendRecord[]; unresolved?: 
     attempted: new Set(opts.attempted ?? []),
     unresolved: opts.unresolved ?? [],
     switchNetwork: () => {},
-    inscriptions: new InscriptionRegistry(),
-    inscriptionsTick: 0,
   };
 }
 

@@ -34,8 +34,7 @@ import {
   type InscriptionArt,
 } from "@core/nft_art.js";
 import type { AppState } from "../App";
-import { ATTACH_NOTE, inscriptionRent, reviewInscribe, reviewInscribeResume, xnt, type Review } from "../lib/actions";
-import { RESUME_BLOCKED_ADVICE, resumeOptions, type ReadyResume } from "../lib/inscriptions";
+import { ATTACH_NOTE, inscribeTooLarge, inscriptionRent, reviewInscribe, xnt, type Review } from "../lib/actions";
 import { signerId } from "../lib/session";
 import { ReviewPanel } from "./ReviewPanel";
 import { CopyButton, errMsg, FriendlyError, Short } from "./ui";
@@ -220,7 +219,7 @@ export function ArtStep({
   }, [estKey]);
 
   const buildInscribe = async () => {
-    if (!net || !payer || !json.bytes || maxFeeLamports === undefined || s.sendPending) return;
+    if (!net || !payer || !json.bytes || maxFeeLamports === undefined || s.sendPending || inscribeTooLarge(json.bytes.length)) return;
     const epoch = s.live().signerEpoch;
     const gen = net.generation;
     setInsBusy(true);
@@ -235,64 +234,49 @@ export function ArtStep({
       setInsBusy(false);
     }
   };
-  // Unfinished uploads, from the app-level registry only (never from this
-  // page's review state, which a signer or network change clears).
-  const ctxPayer = payer?.toBase58() ?? null;
-  const resume = useMemo(
-    () => resumeOptions(s.inscriptions, net ? { rpcUrl: net.rpcUrl, genesisHash: net.genesisHash, payer: ctxPayer } : null),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [s.inscriptions, s.inscriptionsTick, net, ctxPayer],
-  );
+  // Every inscription review this step built, by review id. Kept when the
+  // displayed review is cleared (signer or network change), so a send that
+  // was already running is still read back or reported.
+  const builtIns = useRef(new Map<number, { generation: number; number: bigint; uri: string; content: Uint8Array }>());
+  if (insReview?.inscribe && !builtIns.current.has(insReview.id)) {
+    builtIns.current.set(insReview.id, { generation: insReview.generation, ...insReview.inscribe });
+  }
+  const [failedIns, setFailedIns] = useState<{ number: bigint; signature?: string; state?: string } | null>(null);
 
-  const buildResume = async (option: ReadyResume) => {
-    if (!net || !payer || s.sendPending) return;
-    const epoch = s.live().signerEpoch;
-    setInsBusy(true);
-    setInsError(null);
-    setInsReview(null);
-    try {
-      // Every attempt the registry holds for exactly this upload, each with its
-      // real expiry. The shared planner refuses until each is confirmed or expired.
-      const r = await reviewInscribeResume(net, payer, option.number, option.upload.content, option.attempts);
-      if (s.live().generation === net.generation && s.live().signerEpoch === epoch) setInsReview({ ...r, signerEpoch: epoch });
-    } catch (err) {
-      setInsError(err);
-    } finally {
-      setInsBusy(false);
-    }
-  };
-
-  // After an inscription send finishes ("done"): read the bytes back from chain
-  // and compare before using the uri. Driven by the registry, so it runs even
-  // if this page's review was cleared while the send was in flight.
-  const readBack = useRef(new Set<string>());
+  // After an inscription send finishes: read the bytes back from chain and
+  // compare before using the uri. It is one atomic transaction, so a failure
+  // leaves no partial upload.
+  const handled = useRef(new Set<number>());
   useEffect(() => {
     if (!net) return;
-    for (const h of s.inscriptions.all()) {
-      if (h.pending || h.finished || h.lastResult !== "done" || h.key.rpcUrl !== net.rpcUrl || h.key.genesisHash !== net.genesisHash) continue;
-      const tag = `${h.id}#${h.sends}`;
-      if (readBack.current.has(tag)) continue;
-      readBack.current.add(tag);
-      const number = BigInt(h.key.number);
-      const { content, uri, key } = h;
+    for (const record of s.sends) {
+      const ins = builtIns.current.get(record.reviewId);
+      if (!ins || record.status === "pending" || handled.current.has(record.id)) continue;
+      handled.current.add(record.id);
+      if (record.status === "failed") {
+        setFailedIns({ number: ins.number, signature: record.failedSig, state: record.failState });
+        continue;
+      }
+      setFailedIns(null);
+      if (ins.generation !== net.generation) continue;
       (async () => {
         setVerifyError("");
         try {
-          const ins = await fetchInscription(net.connection, number);
-          if (!ins) throw new Error(`inscription #${number} is not on chain`);
-          if (!ins.sealed || !bytesEqual(ins.content, content)) {
-            s.inscriptions.markReadBack(key, false);
-            throw new Error(`inscription #${number} on chain does not hold exactly your JSON yet (${ins.written} of ${ins.totalSize} bytes); press Resume`);
+          const onChain = await fetchInscription(net.connection, ins.number);
+          if (!onChain) throw new Error(`inscription #${ins.number} is not on chain`);
+          if (!onChain.sealed || !bytesEqual(onChain.content, ins.content)) {
+            throw new Error(`inscription #${ins.number} on chain does not hold exactly your JSON (${onChain.written} of ${onChain.totalSize} bytes); do not use its link`);
           }
-          s.inscriptions.markReadBack(key, true);
-          setVerified({ generation: net.generation, number, uri, bytes: content });
+          setVerified({ generation: net.generation, number: ins.number, uri: ins.uri, bytes: ins.content });
         } catch (err) {
           setVerifyError(errMsg(err));
         }
       })();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [s.inscriptionsTick, net]);
+  }, [s.sends, net]);
+
+  // The app inscribes single-transaction content only (<= 600 bytes).
+  const tooLarge = json.bytes ? inscribeTooLarge(json.bytes.length) : undefined;
 
   const verifiedOk = !!verified && verified.generation === net?.generation && !!json.bytes && bytesEqual(verified.bytes, json.bytes);
 
@@ -490,9 +474,14 @@ export function ArtStep({
       <fieldset className="choice">
         <legend>Where the NFT's metadata lives</legend>
         <label>
-          <input type="radio" name="link-mode" checked={mode === "inscribe"} onChange={() => setMode("inscribe")} aria-label="Inscribe on X1" /> (a) Inscribe it on X1
-          (about 0.52 XNT, on chain)
+          <input type="radio" name="link-mode" checked={mode === "inscribe"} disabled={!!tooLarge} onChange={() => setMode("inscribe")} aria-label="Inscribe on X1" /> (a)
+          Inscribe it on X1 (about 0.52 XNT, on chain, one transaction)
         </label>
+        {tooLarge && (
+          <p className="warn small" data-testid="inscribe-too-large">
+            {tooLarge}
+          </p>
+        )}
         <label>
           <input type="radio" name="link-mode" checked={mode === "host"} onChange={() => setMode("host")} aria-label="Host it myself" /> (b) Download the JSON, host it
           yourself, paste its link
@@ -573,7 +562,11 @@ export function ArtStep({
                 </p>
               ) : (
                 <div className="row wrap">
-                  <button disabled={!payer || !json.bytes || maxFeeLamports === undefined || insBusy || s.sendPending} onClick={() => void buildInscribe()} data-testid="inscribe-review">
+                  <button
+                    disabled={!payer || !json.bytes || !!tooLarge || maxFeeLamports === undefined || insBusy || s.sendPending}
+                    onClick={() => void buildInscribe()}
+                    data-testid="inscribe-review"
+                  >
                     {insBusy ? "Planning and simulating..." : "Review inscription"}
                   </button>
                   {!payer && <span className="small muted">Connect a wallet to inscribe.</span>}
@@ -581,46 +574,25 @@ export function ArtStep({
               )}
               {verified && !verifiedOk && <p className="warn small">You changed the JSON after inscribing #{verified.number.toString()}; inscribe again or undo the change.</p>}
               {verifyError && <p className="error small">{verifyError}</p>}
+              {failedIns && !verifiedOk && (
+                <p className="error small" data-testid="inscribe-failed">
+                  The inscription transaction for #{failedIns.number.toString()} did not confirm
+                  {failedIns.signature ? (
+                    <>
+                      {" "}
+                      (signature <span className="mono">{failedIns.signature}</span>)
+                    </>
+                  ) : null}
+                  . {failedIns.state === "not sent" || !failedIns.signature ? "It was never broadcast, so nothing was written." : "Check it before trying again; if it didn't land, nothing was written."} It is one
+                  transaction, so there is no partial upload to resume.
+                </p>
+              )}
             </>
           )}
           {insError !== null && <FriendlyError err={insError} cluster={net?.cluster} testId="inscribe-error" />}
           {insReview && <ReviewPanel s={s} review={insReview} onClose={() => setInsReview(null)} />}
         </div>
       )}
-
-      {(resume.ready.length > 0 || resume.blocked.length > 0) && (
-        <div className="resume" data-testid="inscribe-resume-section">
-          <p className="small">Unfinished inscription upload{resume.ready.length + resume.blocked.length === 1 ? "" : "s"}:</p>
-          {resume.ready.map((r) => (
-            <div key={r.upload.id} className="row wrap">
-              <button disabled={!payer || insBusy || s.sendPending} onClick={() => void buildResume(r)} data-testid="inscribe-resume">
-                Resume #{r.number.toString()}
-              </button>
-              <span className="small muted">
-                Sends only what is missing, after every one of its {r.attempts.length} earlier transaction{r.attempts.length === 1 ? "" : "s"} has confirmed or
-                expired.
-              </span>
-            </div>
-          ))}
-          {resume.blocked.map((b, i) => (
-            <div key={`${b.number}-${i}`} className="resume-blocked" data-testid="resume-blocked">
-              <button disabled data-testid="inscribe-resume-disabled">
-                Resume #{b.number}
-              </button>
-              <p className="warn small">
-                Resume is off for #{b.number}. {b.reason} Resuming without the full history could write a chunk twice and seal the wrong JSON. {RESUME_BLOCKED_ADVICE}
-              </p>
-              {b.marker && (
-                <button className="link small" onClick={() => s.inscriptions.forgetForeign(b.marker!)} data-testid="forget-resume-note">
-                  hide this note
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-      {mode !== "inscribe" && insError !== null && <FriendlyError err={insError} cluster={net?.cluster} testId="inscribe-error" />}
-      {mode !== "inscribe" && insReview && <ReviewPanel s={s} review={insReview} onClose={() => setInsReview(null)} />}
 
       {result.state === "pending" && (
         <p className="small warn-text" data-testid="art-pending">

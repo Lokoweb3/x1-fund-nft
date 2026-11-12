@@ -30,7 +30,6 @@ import {
   type CreateFundArgs,
   type MintMeta,
   type Plan,
-  type SubmitHook,
   type TxOutcome,
 } from "@core/owner.js";
 import {
@@ -46,7 +45,7 @@ import {
   type SimResult,
 } from "@core/rpc.js";
 import { TOKEN_2022_PROGRAM_ID } from "@core/pool.js";
-import { INSCRIPTION_PROGRAM_ID, inscriptionUri, prepareInscribe, prepareInscribeResume, type InscribePlan, type PriorAttempt } from "@core/inscribe.js";
+import { FIRST_CHUNK_MAX, INSCRIPTION_PROGRAM_ID, prepareInscribe, type InscribePlan } from "@core/inscribe.js";
 import type { MetadataFields, MetadataUpdate } from "@core/metadata.js";
 import type { NetworkInfo } from "./network";
 import { assertSession, sessionGuard, signerId, type SessionKey } from "./session";
@@ -120,12 +119,6 @@ export interface Review {
     uri: string;
     content: Uint8Array;
     contentType: string;
-    /**
-     * For a resume: how many attempts of this upload the app's registry held
-     * when the review was planned. If more were sent since, the plan is stale
-     * and the review cannot send.
-     */
-    historyLen?: number;
   };
 }
 
@@ -470,8 +463,36 @@ export async function inscriptionRent(net: NetworkInfo, bytes: number): Promise<
   return (await rent(net, 212 + bytes)) + (await rent(net, 588)) + 1_500_000n;
 }
 
+/**
+ * The canary app inscribes only what fits ONE transaction: content of at most
+ * FIRST_CHUNK_MAX (600) bytes, which planInscribe sends as a single inscribe
+ * that seals at once (no append, no thaw). One transaction is atomic, so a
+ * failure never leaves a partial upload, and the app never needs to resume.
+ * Multi-transaction inscriptions and resume stay at the core/CLI level
+ * (keeper/src/core/inscribe.ts), out of canary scope.
+ */
+export const INSCRIBE_MAX_BYTES = FIRST_CHUNK_MAX;
+
+export function inscribeTooLarge(bytes: number): string | undefined {
+  if (bytes <= INSCRIBE_MAX_BYTES) return undefined;
+  return `Too large to inscribe in one transaction (${bytes} bytes, max ${INSCRIBE_MAX_BYTES}). Turn on Compact, shorten the description, or use Upload/Paste link.`;
+}
+
+/** Throws unless the inscription plan is exactly one transaction carrying all of `content`. Checked at planning and again before sending. */
+export function assertSingleTxInscription(plan: Plan, content: Uint8Array): void {
+  const tooLarge = inscribeTooLarge(content.length);
+  if (tooLarge) throw new Error(`${tooLarge} Nothing was simulated or sent.`);
+  if (plan.txs.length !== 1) {
+    throw new Error(`the inscription plan has ${plan.txs.length} transactions; the app only sends single-transaction inscriptions. Nothing was simulated or sent.`);
+  }
+}
+
 export async function reviewInscribe(net: NetworkInfo, payer: PublicKey, content: Uint8Array, maxFee: bigint): Promise<Review> {
+  // Refuse before any RPC read.
+  const tooLarge = inscribeTooLarge(content.length);
+  if (tooLarge) throw new Error(`${tooLarge} Nothing was simulated or sent.`);
   const p = await prepareInscribe(net.connection, { payer, content, contentType: "application/json", maxFee });
+  assertSingleTxInscription(p, content);
   const rentLamports = await inscriptionRent(net, content.length);
   const rows: Row[] = [
     ["Program", INSCRIPTION_PROGRAM_ID.toBase58()],
@@ -485,14 +506,10 @@ export async function reviewInscribe(net: NetworkInfo, payer: PublicKey, content
     ["Uri", p.uri],
   ];
   const warnings = [
-    "If someone else inscribes first, transaction 1 fails (the predicted number is taken). No inscription fee or rent is committed on that failure, but the network fee can still be charged if the transaction lands and fails. Build the review again.",
+    "If someone else inscribes first, the transaction fails (the predicted number is taken). No inscription fee or rent is committed on that failure, but the network fee can still be charged if the transaction lands and fails. Build the review again.",
   ];
-  if (p.txs.length > 1) {
-    warnings.push(
-      `Transactions 2-${p.txs.length} cannot be simulated in advance: each needs the bytes the previous one wrote. The RPC simulates each (preflight) when it is sent. If one does not land, press "Resume" to send only what is missing.`,
-    );
-  }
-  const plan: Plan = { ...p, recovery: `press "Resume" in the NFT image step for inscription #${p.number}` };
+  // One atomic transaction: there is nothing to resume.
+  const plan: Plan = { ...p, recovery: undefined };
   const r = await finishReview(
     net,
     payer,
@@ -501,36 +518,6 @@ export async function reviewInscribe(net: NetworkInfo, payer: PublicKey, content
     { program: "inscriptions" },
   );
   return r;
-}
-
-/**
- * Resume an inscription. `priorAttempts` is every earlier transaction of this
- * upload that was signed and may have been submitted; the shared planner
- * refuses ("not resuming yet") until each is confirmed or expired, and only
- * then reads the account.
- */
-export async function reviewInscribeResume(
-  net: NetworkInfo,
-  payer: PublicKey,
-  number: bigint,
-  content: Uint8Array,
-  priorAttempts: PriorAttempt[],
-): Promise<Review> {
-  const historyLen = priorAttempts.length;
-  const plan = await prepareInscribeResume(net.connection, { payer, number, content, contentType: "application/json", priorAttempts });
-  const rows: Row[] = plan.txs.map((t, i): Row => [`tx ${i + 1}`, t.label]);
-  return finishReview(
-    net,
-    payer,
-    "Resume inscription",
-    {
-      plan,
-      rows,
-      sentences: [`This finishes inscription #${number}: it re-read what is already on chain and sends only the missing part (${plan.txs.length} transaction${plan.txs.length === 1 ? "" : "s"}).`],
-      inscribe: { number, uri: inscriptionUri(number), content, contentType: "application/json", historyLen },
-    },
-    { program: "inscriptions" },
-  );
 }
 
 /**
@@ -550,11 +537,10 @@ export async function signAndSend(input: {
   mainnetAck: boolean;
   getLive: () => SessionKey;
   log?: (line: string) => void;
-  /** Passed to sendPlan: called synchronously right before each broadcast. */
-  onSubmit?: SubmitHook;
 }): Promise<TxOutcome[]> {
   const { net, review, signer } = input;
   if (!review.simOk) throw new Error("every simulation must pass before sending");
+  if (review.inscribe) assertSingleTxInscription(review.plan, review.inscribe.content);
   if (review.rpcUrl !== net.rpcUrl || review.generation !== net.generation) {
     throw new Error("the network changed since this review was built; build it again");
   }
@@ -598,6 +584,5 @@ export async function signAndSend(input: {
     rpcUrl: net.rpcUrl,
     log: input.log ?? (() => {}),
     guard: sessionGuard(expected, input.getLive),
-    onSubmit: input.onSubmit,
   });
 }

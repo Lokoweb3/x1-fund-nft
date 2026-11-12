@@ -120,11 +120,7 @@ test("friendly errors map to actions", () => {
   assert.match(friendlyError(new Error('failed: {"InstructionError":[1,{"Custom":6052}]}')).title, /^Pay for the image from an ordinary wallet/);
   assert.match(friendlyError(new Error("custom program error: 0x17a5")).title, /^Token Metadata changed your wallet account, transaction refused/);
   assert.match(friendlyError(new Error("Error Code: PayerNotWallet")).title, /ordinary wallet/);
-  assert.match(friendlyError(new Error("not resuming yet: an earlier transaction may still land")).title, /about a minute/);
-  assert.equal(
-    friendlyError(new Error("the RPC answered from slot 100, older than the settlement evidence at slot 120; nothing was simulated or sent")).title,
-    "The network node is behind, try resuming again in a few seconds.",
-  );
+  assert.match(friendlyError(new Error("the inscription plan has 2 transactions; the app only sends single-transaction inscriptions.")).title, /max 600 bytes/);
   assert.equal(friendlyError(new Error("something odd")).title, "something odd");
 });
 

@@ -121,14 +121,8 @@ export function friendlyError(err: unknown, opts: { cluster?: string; send?: Sen
   if (/AttachCostTooHigh|0x17a3\b|"Custom":6051/.test(raw)) {
     return { title: "Attaching the NFT metadata would cost more than the program allows (0.03 XNT), so it refused.", raw };
   }
-  if (/the RPC answered from slot \d+, older than the settlement evidence/.test(raw)) {
-    return { title: "The network node is behind, try resuming again in a few seconds.", raw };
-  }
-  if (/not resuming yet/.test(raw)) {
-    return {
-      title: "An earlier transaction of this inscription may still land. Try Resume again in about a minute, once it has confirmed or expired.",
-      raw,
-    };
+  if (/only sends single-transaction inscriptions|Too large to inscribe in one transaction/.test(raw)) {
+    return { title: "This JSON is too large to inscribe in one transaction (max 600 bytes). Turn on Compact, shorten the description, or use Upload/Paste link.", raw };
   }
   if (/FeeChanged|6069|above the max fee/.test(raw)) {
     return { title: "The inscription fee is higher than your maximum. Read the fee again and decide.", raw };

@@ -13,8 +13,7 @@ import {
   type NetworkInfo,
   type RpcSettings,
 } from "./lib/network";
-import { signAndSend, type Review } from "./lib/actions";
-import { InscriptionRegistry, localMarkerStore, reviewUploadKey, staleResumeReason, trackInscriptionSend } from "./lib/inscriptions";
+import { assertSingleTxInscription, signAndSend, type Review } from "./lib/actions";
 import { signerId, type SessionKey } from "./lib/session";
 import { createLocalTestWallet, walletSigner, type AppSigner } from "./lib/signer";
 import { CreateWizard } from "./components/CreateWizard";
@@ -52,14 +51,6 @@ export interface AppState {
   unresolved: Unresolved[];
   /** Switch the network (refused while a send is pending), e.g. from a friendly error. */
   switchNetwork: (choice: RpcSettings["choice"]) => void;
-  /**
-   * Every inscription transaction this page broadcast, by upload, recorded
-   * from sendPlan's onSubmit. Never cleared (like `attempted`); Resume builds
-   * its priorAttempts only from here (lib/inscriptions.ts).
-   */
-  inscriptions: InscriptionRegistry;
-  /** Increases on every registry change, so pages re-render. */
-  inscriptionsTick: number;
 }
 
 export interface Unresolved {
@@ -111,10 +102,6 @@ function Shell() {
 
   const [unresolved, setUnresolved] = useState<Unresolved[]>([]);
   const attemptedRef = useRef(new Set<number>());
-  // Never replaced or cleared for the life of the page.
-  const [inscriptions] = useState(() => new InscriptionRegistry(localMarkerStore));
-  const [inscriptionsTick, setInscriptionsTick] = useState(0);
-  useEffect(() => inscriptions.subscribe(() => setInscriptionsTick((t) => t + 1)), [inscriptions]);
 
   // The signer is bound to one adapter object; it signs through that adapter only.
   const adapter = wallet.wallet?.adapter ?? null;
@@ -268,8 +255,14 @@ function Shell() {
 
   const startSend = (review: Review) => {
     if (pendingRef.current || !net || !signer || attemptedRef.current.has(review.id)) return;
-    // A resume planned before more attempts of its upload were sent is stale.
-    if (staleResumeReason(inscriptions, review, net.genesisHash)) return;
+    // The app sends single-transaction inscriptions only (signAndSend checks again).
+    if (review.inscribe) {
+      try {
+        assertSingleTxInscription(review.plan, review.inscribe.content);
+      } catch {
+        return;
+      }
+    }
     pendingRef.current = true;
     // Consumed for good: dismissing the receipt does not make it sendable again.
     attemptedRef.current.add(review.id);
@@ -288,26 +281,17 @@ function Shell() {
     };
     setSends((rs) => [record, ...rs]);
     const lines: string[] = [];
-    const run = (onSubmit?: Parameters<typeof signAndSend>[0]["onSubmit"]) =>
-      signAndSend({
-        net,
-        review,
-        signer,
-        mainnetAck,
-        getLive: live,
-        log: (line) => {
-          lines.push(line.trim());
-          update(id, { lines: [...lines] });
-        },
-        onSubmit,
-      });
-    // An inscription send records every broadcast in the registry, whatever happens to the page.
-    const uploadKey = reviewUploadKey(review, net.genesisHash);
-    const sending =
-      uploadKey && review.inscribe
-        ? trackInscriptionSend(inscriptions, { key: uploadKey, content: review.inscribe.content, uri: review.inscribe.uri }, run)
-        : run();
-    sending.then(
+    signAndSend({
+      net,
+      review,
+      signer,
+      mainnetAck,
+      getLive: live,
+      log: (line) => {
+        lines.push(line.trim());
+        update(id, { lines: [...lines] });
+      },
+    }).then(
       (outcomes) => update(id, { status: "done", outcomes }),
       (err: unknown) => {
         if (err instanceof PlanSendError) {
@@ -340,8 +324,6 @@ function Shell() {
     attempted: attemptedRef.current,
     unresolved,
     switchNetwork: (choice) => updateRpc({ choice }),
-    inscriptions,
-    inscriptionsTick,
   };
   const cluster = net?.cluster;
   const lock = sendPending ? "A send is in progress; wait for it to finish." : undefined;
