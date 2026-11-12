@@ -23,8 +23,23 @@ import { validateMetadataFields, validateMetadataUpdate, type MetadataFields, ty
 export * from "./core/owner.js";
 export * from "./core/metadata.js";
 
-export type Command = "create-fund" | "deposit" | "withdraw" | "show" | "ensure-vaults" | "set-metadata";
-export const COMMANDS: readonly Command[] = ["create-fund", "deposit", "withdraw", "show", "ensure-vaults", "set-metadata"];
+export type Command =
+  | "create-fund"
+  | "deposit"
+  | "withdraw"
+  | "withdraw-native"
+  | "show"
+  | "ensure-vaults"
+  | "set-metadata";
+export const COMMANDS: readonly Command[] = [
+  "create-fund",
+  "deposit",
+  "withdraw",
+  "withdraw-native",
+  "show",
+  "ensure-vaults",
+  "set-metadata",
+];
 
 export interface CommonOptions {
   send: boolean;
@@ -39,6 +54,7 @@ export type ParsedCli =
   | { command: "create-fund"; options: CommonOptions; create: CreateFundArgs; metadata: MetadataFields | undefined }
   | { command: "deposit"; options: CommonOptions; fund: PublicKey; amount: bigint }
   | { command: "withdraw"; options: CommonOptions; fund: PublicKey; mint: PublicKey; amount: bigint | "all" }
+  | { command: "withdraw-native"; options: CommonOptions; fund: PublicKey; amount: bigint | "all" }
   | { command: "show"; options: CommonOptions; fund: PublicKey }
   | { command: "ensure-vaults"; options: CommonOptions; fund: PublicKey }
   | { command: "set-metadata"; options: CommonOptions; fund: PublicKey; update: MetadataUpdate };
@@ -78,6 +94,7 @@ const ALLOWED: Record<Command, string[]> = {
   ],
   deposit: ["--fund", "--amount"],
   withdraw: ["--fund", "--mint", "--amount"],
+  "withdraw-native": ["--fund", "--amount"],
   show: ["--fund"],
   "ensure-vaults": ["--fund"],
   "set-metadata": ["--fund", "--name", "--symbol", "--uri"],
@@ -94,6 +111,9 @@ commands:
                --name/--symbol/--uri together attach NFT metadata as tx 2)
   deposit     --fund <pda> --amount <raw>
   withdraw    --fund <pda> --mint <mint> --amount <raw|all>
+  withdraw-native --fund <pda> --amount <lamports|all>
+              NFT holder only: native XNT on the fund account above its rent-exempt minimum
+              (reflections paid to the fund PDA, or XNT sent to it); all = everything available
   show        --fund <pda>
   ensure-vaults --fund <pda>   create any missing quote/target vault ATAs (idempotent)
   set-metadata --fund <pda> [--name <text>] [--symbol <text>] [--uri <url>]
@@ -220,6 +240,12 @@ export function parseCli(argv: string[]): ParsedCli {
         mint: parsePubkey(need("--mint"), "--mint"),
         amount,
       };
+    }
+    case "withdraw-native": {
+      const raw = need("--amount");
+      const amount = raw === "all" ? "all" : parseUint(raw, "--amount", U64_MAX);
+      if (amount === 0n) throw new Error("--amount must be greater than zero");
+      return { command: cmd, options, fund: parsePubkey(need("--fund"), "--fund"), amount };
     }
     case "show":
     case "ensure-vaults":

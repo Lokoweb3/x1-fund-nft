@@ -669,7 +669,301 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
         .args(fund_nft::instruction::Withdraw { amount: 1 })
         .send();
     assert!(rejected.is_err(), "a non-holder must not withdraw");
+
+    check_withdraw_native_flow(
+        &program,
+        &rpc,
+        &payer,
+        &stranger,
+        fund,
+        nft_mint.pubkey(),
+        creator_nft,
+        &[quote_vault, target_vault],
+    );
     drop(validator);
+}
+
+fn withdraw_native_accounts(
+    holder: Pubkey,
+    fund: Pubkey,
+    nft_mint: Pubkey,
+    nft_account: Pubkey,
+) -> fund_nft::accounts::WithdrawNative {
+    fund_nft::accounts::WithdrawNative {
+        holder,
+        fund,
+        nft_mint,
+        nft_account,
+        nft_token_program: fund_nft::NFT_TOKEN_PROGRAM_ID,
+    }
+}
+
+/// System Program `Transfer` (instruction 2): how a reflection bot pays the
+/// owner of a token account, which for a fund vault is the fund PDA.
+fn system_transfer(from: &Pubkey, to: &Pubkey, lamports: u64) -> Instruction {
+    let mut data = 2u32.to_le_bytes().to_vec();
+    data.extend_from_slice(&lamports.to_le_bytes());
+    Instruction {
+        program_id: System::id(),
+        accounts: vec![AccountMeta::new(*from, true), AccountMeta::new(*to, false)],
+        data,
+    }
+}
+
+/// Fee and `Program data:` payloads of a confirmed transaction.
+fn tx_fee_and_events(
+    rpc: &solana_client::rpc_client::RpcClient,
+    signature: &solana_signature::Signature,
+) -> (u64, Vec<Vec<u8>>) {
+    use solana_transaction_status_client_types::option_serializer::OptionSerializer;
+    use solana_transaction_status_client_types::UiTransactionEncoding;
+    let tx = rpc
+        .get_transaction_with_config(
+            signature,
+            solana_client::rpc_config::RpcTransactionConfig {
+                encoding: Some(UiTransactionEncoding::Json),
+                commitment: Some(anchor_client::CommitmentConfig::confirmed()),
+                max_supported_transaction_version: Some(0),
+            },
+        )
+        .expect("get_transaction");
+    let meta = tx.transaction.meta.expect("transaction meta");
+    let logs = match meta.log_messages {
+        OptionSerializer::Some(logs) => logs,
+        _ => Vec::new(),
+    };
+    let events = logs
+        .iter()
+        .filter_map(|line| line.strip_prefix("Program data: "))
+        .filter_map(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+        .collect();
+    (meta.fee, events)
+}
+
+/// Native XNT on the fund PDA (a reflection payout or any System transfer):
+/// a non-holder is refused, zero is refused, the holder takes part, one
+/// lamport above what is available is refused, the holder takes the rest, and
+/// the fund ends exactly at its rent-exempt minimum. Vaults, budgets, and
+/// every other fund field are unchanged throughout.
+#[allow(clippy::too_many_arguments)]
+fn check_withdraw_native_flow(
+    program: &ProgramClient,
+    rpc: &solana_client::rpc_client::RpcClient,
+    payer: &Keypair,
+    stranger: &Keypair,
+    fund: Pubkey,
+    nft_mint: Pubkey,
+    creator_nft: Pubkey,
+    vaults: &[Pubkey],
+) {
+    use anchor_lang::{AccountSerialize, Discriminator};
+    let holder = payer.pubkey();
+    let fund_bytes = |rpc: &solana_client::rpc_client::RpcClient| account_data(rpc, &fund);
+    let vault_balances = |rpc: &solana_client::rpc_client::RpcClient| -> Vec<u64> {
+        vaults
+            .iter()
+            .map(|v| token_amount(&account_data(rpc, v)))
+            .collect()
+    };
+    let data_before = fund_bytes(rpc);
+    let vaults_before = vault_balances(rpc);
+    let rent_minimum = rpc
+        .get_minimum_balance_for_rent_exemption(data_before.len())
+        .unwrap();
+    let lamports_before = rpc.get_balance(&fund).unwrap();
+    // Anchor's init funds exactly the rent-exempt minimum.
+    assert_eq!(lamports_before, rent_minimum, "fund starts at rent minimum");
+
+    // Nothing is available yet.
+    let empty = program
+        .request()
+        .accounts(withdraw_native_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+        ))
+        .args(fund_nft::instruction::WithdrawNative { amount: 1 })
+        .send();
+    expect_fund_error(
+        empty,
+        fund_nft::FundError::NativeAboveAvailable,
+        "withdraw_native with nothing above rent",
+    );
+
+    // A reflection-style System transfer to the fund PDA.
+    let reflected: u64 = 250_000_000;
+    program
+        .request()
+        .instruction(system_transfer(&holder, &fund, reflected))
+        .send()
+        .expect("system transfer to the fund PDA");
+    assert_eq!(rpc.get_balance(&fund).unwrap(), rent_minimum + reflected);
+
+    // A stranger signing as holder with the real holder's NFT account.
+    let stranger_try = program
+        .request()
+        .accounts(withdraw_native_accounts(
+            stranger.pubkey(),
+            fund,
+            nft_mint,
+            creator_nft,
+        ))
+        .args(fund_nft::instruction::WithdrawNative { amount: 1 })
+        .signer(stranger)
+        .send();
+    expect_fund_error(
+        stranger_try,
+        fund_nft::FundError::BadNft,
+        "non-holder withdraw_native",
+    );
+    // The NFT token program must be classic SPL Token.
+    let mut wrong_program = withdraw_native_accounts(holder, fund, nft_mint, creator_nft);
+    wrong_program.nft_token_program = fund_nft::TOKEN_2022_PROGRAM_ID;
+    let wrong = program
+        .request()
+        .accounts(wrong_program)
+        .args(fund_nft::instruction::WithdrawNative { amount: 1 })
+        .send();
+    expect_fund_error(
+        wrong,
+        fund_nft::FundError::NftTokenProgram,
+        "withdraw_native with Token-2022 as the NFT program",
+    );
+    let zero = program
+        .request()
+        .accounts(withdraw_native_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+        ))
+        .args(fund_nft::instruction::WithdrawNative { amount: 0 })
+        .send();
+    expect_fund_error(zero, fund_nft::FundError::ZeroAmount, "withdraw_native 0");
+    assert_eq!(rpc.get_balance(&fund).unwrap(), rent_minimum + reflected);
+
+    // The holder withdraws part.
+    let part: u64 = 100_000_000;
+    let holder_before = rpc.get_balance(&holder).unwrap();
+    let sig = program
+        .request()
+        .accounts(withdraw_native_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+        ))
+        .args(fund_nft::instruction::WithdrawNative { amount: part })
+        .send()
+        .expect("holder withdraw_native part");
+    let (fee, events) = tx_fee_and_events(rpc, &sig);
+    assert_eq!(
+        rpc.get_balance(&holder).unwrap(),
+        holder_before + part - fee,
+        "holder receives exactly the amount, less the tx fee"
+    );
+    assert_eq!(
+        rpc.get_balance(&fund).unwrap(),
+        rent_minimum + reflected - part
+    );
+    let mut expected_event = fund_nft::NativeWithdrawn::DISCRIMINATOR.to_vec();
+    expected_event.extend_from_slice(fund.as_ref());
+    expected_event.extend_from_slice(holder.as_ref());
+    expected_event.extend_from_slice(&part.to_le_bytes());
+    assert!(
+        events.contains(&expected_event),
+        "NativeWithdrawn event missing: {events:?}"
+    );
+
+    // One lamport above what is left is refused.
+    let available = reflected - part;
+    let over = program
+        .request()
+        .accounts(withdraw_native_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+        ))
+        .args(fund_nft::instruction::WithdrawNative {
+            amount: available + 1,
+        })
+        .send();
+    expect_fund_error(
+        over,
+        fund_nft::FundError::NativeAboveAvailable,
+        "withdraw_native available + 1",
+    );
+    let huge = program
+        .request()
+        .accounts(withdraw_native_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+        ))
+        .args(fund_nft::instruction::WithdrawNative { amount: u64::MAX })
+        .send();
+    expect_fund_error(
+        huge,
+        fund_nft::FundError::NativeAboveAvailable,
+        "withdraw_native u64::MAX",
+    );
+
+    // The holder withdraws everything available.
+    let holder_before = rpc.get_balance(&holder).unwrap();
+    let sig = program
+        .request()
+        .accounts(withdraw_native_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+        ))
+        .args(fund_nft::instruction::WithdrawNative { amount: available })
+        .send()
+        .expect("holder withdraw_native all");
+    let (fee, _) = tx_fee_and_events(rpc, &sig);
+    assert_eq!(
+        rpc.get_balance(&holder).unwrap(),
+        holder_before + available - fee
+    );
+    assert_eq!(
+        rpc.get_balance(&fund).unwrap(),
+        rent_minimum,
+        "the fund stays exactly rent-exempt"
+    );
+    let after_all = program
+        .request()
+        .accounts(withdraw_native_accounts(
+            holder,
+            fund,
+            nft_mint,
+            creator_nft,
+        ))
+        .args(fund_nft::instruction::WithdrawNative { amount: 1 })
+        .send();
+    expect_fund_error(
+        after_all,
+        fund_nft::FundError::NativeAboveAvailable,
+        "withdraw_native after withdrawing all",
+    );
+
+    // Vaults, budgets, targets, and every fund byte are unchanged.
+    assert_eq!(
+        vault_balances(rpc),
+        vaults_before,
+        "vault balances unchanged"
+    );
+    let data_after = fund_bytes(rpc);
+    assert_eq!(data_after, data_before, "fund account data unchanged");
+    let account: fund_nft::Fund = program.account(fund).unwrap();
+    let mut reserialized = Vec::new();
+    account.try_serialize(&mut reserialized).unwrap();
+    assert_eq!(&data_after[..reserialized.len()], &reserialized[..]);
+    let owner = rpc.get_account(&fund).unwrap().owner;
+    assert_eq!(owner, PROGRAM_ID, "fund still owned by the program");
 }
 
 type ProgramClient<'a> = anchor_client::Program<&'a Keypair>;
