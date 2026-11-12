@@ -17,7 +17,6 @@ import {
   fetchInscriptionConfig,
   planInscribe,
   type InscriptionConfig,
-  type PriorAttempt,
 } from "@core/inscribe.js";
 import { compileTx, parseUi } from "@core/owner.js";
 import { MAX_NAME_LEN, MAX_SYMBOL_LEN, MAX_URI_LEN, utf8Length, validateMetadataUpdate, type MetadataFields } from "@core/metadata.js";
@@ -36,6 +35,7 @@ import {
 } from "@core/nft_art.js";
 import type { AppState } from "../App";
 import { ATTACH_NOTE, inscriptionRent, reviewInscribe, reviewInscribeResume, xnt, type Review } from "../lib/actions";
+import { RESUME_BLOCKED_ADVICE, resumeOptions, type ReadyResume } from "../lib/inscriptions";
 import { signerId } from "../lib/session";
 import { ReviewPanel } from "./ReviewPanel";
 import { CopyButton, errMsg, FriendlyError, Short } from "./ui";
@@ -161,7 +161,6 @@ export function ArtStep({
   const [insError, setInsError] = useState<unknown>(null);
   const [verified, setVerified] = useState<{ generation: number; number: bigint; uri: string; bytes: Uint8Array } | null>(null);
   const [verifyError, setVerifyError] = useState("");
-  const [resumable, setResumable] = useState<{ number: bigint; bytes: Uint8Array; attempts: PriorAttempt[] } | null>(null);
   const payer = s.signer?.publicKey ?? null;
   const signerKey = signerId(s.signer);
 
@@ -236,15 +235,26 @@ export function ArtStep({
       setInsBusy(false);
     }
   };
-  const buildResume = async () => {
-    if (!net || !payer || !resumable || s.sendPending) return;
+  // Unfinished uploads, from the app-level registry only (never from this
+  // page's review state, which a signer or network change clears).
+  const ctxPayer = payer?.toBase58() ?? null;
+  const resume = useMemo(
+    () => resumeOptions(s.inscriptions, net ? { rpcUrl: net.rpcUrl, genesisHash: net.genesisHash, payer: ctxPayer } : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [s.inscriptions, s.inscriptionsTick, net, ctxPayer],
+  );
+
+  const buildResume = async (option: ReadyResume) => {
+    if (!net || !payer || s.sendPending) return;
     const epoch = s.live().signerEpoch;
     setInsBusy(true);
     setInsError(null);
+    setInsReview(null);
     try {
-      // The shared planner refuses until every earlier attempt is confirmed or expired.
-      const r = await reviewInscribeResume(net, payer, resumable.number, resumable.bytes, resumable.attempts);
-      setInsReview({ ...r, signerEpoch: epoch });
+      // Every attempt the registry holds for exactly this upload, each with its
+      // real expiry. The shared planner refuses until each is confirmed or expired.
+      const r = await reviewInscribeResume(net, payer, option.number, option.upload.content, option.attempts);
+      if (s.live().generation === net.generation && s.live().signerEpoch === epoch) setInsReview({ ...r, signerEpoch: epoch });
     } catch (err) {
       setInsError(err);
     } finally {
@@ -252,48 +262,37 @@ export function ArtStep({
     }
   };
 
-  // After an inscription send finishes: read the bytes back from chain and compare before using the uri.
-  const record = insReview ? s.sends.find((r) => r.reviewId === insReview.id) : undefined;
-  const handled = useRef(new Set<number>());
+  // After an inscription send finishes ("done"): read the bytes back from chain
+  // and compare before using the uri. Driven by the registry, so it runs even
+  // if this page's review was cleared while the send was in flight.
+  const readBack = useRef(new Set<string>());
   useEffect(() => {
-    if (!record || !insReview?.inscribe || !net || record.status === "pending" || handled.current.has(record.id)) return;
-    handled.current.add(record.id);
-    const { number, uri, content } = insReview.inscribe;
-    // Every transaction of this upload that was signed and may have been
-    // submitted, each with its real expiry from submission time. Without one
-    // it never counts as expired (fail closed), so a lagging RPC's null status
-    // can never make a confirmed append look expired.
-    const sent: PriorAttempt[] = record.outcomes.map((o) => ({
-      signature: o.signature,
-      lastValidBlockHeight: o.lastValidBlockHeight ?? Number.MAX_SAFE_INTEGER,
-      ...(o.confirmedSlot !== undefined ? { confirmedSlot: o.confirmedSlot } : {}),
-    }));
-    if (record.failedSig && record.failState !== "not sent") {
-      sent.push({ signature: record.failedSig, lastValidBlockHeight: record.failedLastValid ?? Number.MAX_SAFE_INTEGER });
-    }
-    const prior = resumable && resumable.number === number ? resumable.attempts : [];
-    const attempts = [...prior, ...sent];
-    if (record.status === "failed") {
-      // Something may have landed: offer the resume planner (it re-reads the chain and refuses any mismatch).
-      if (attempts.length > 0) setResumable({ number, bytes: content, attempts });
-      return;
-    }
-    (async () => {
-      setVerifyError("");
-      try {
-        const ins = await fetchInscription(net.connection, number);
-        if (!ins) throw new Error(`inscription #${number} is not on chain`);
-        if (!ins.sealed || !bytesEqual(ins.content, content)) {
-          setResumable({ number, bytes: content, attempts });
-          throw new Error(`inscription #${number} on chain does not hold exactly your JSON yet (${ins.written} of ${ins.totalSize} bytes); press Resume`);
+    if (!net) return;
+    for (const h of s.inscriptions.all()) {
+      if (h.pending || h.finished || h.lastResult !== "done" || h.key.rpcUrl !== net.rpcUrl || h.key.genesisHash !== net.genesisHash) continue;
+      const tag = `${h.id}#${h.sends}`;
+      if (readBack.current.has(tag)) continue;
+      readBack.current.add(tag);
+      const number = BigInt(h.key.number);
+      const { content, uri, key } = h;
+      (async () => {
+        setVerifyError("");
+        try {
+          const ins = await fetchInscription(net.connection, number);
+          if (!ins) throw new Error(`inscription #${number} is not on chain`);
+          if (!ins.sealed || !bytesEqual(ins.content, content)) {
+            s.inscriptions.markReadBack(key, false);
+            throw new Error(`inscription #${number} on chain does not hold exactly your JSON yet (${ins.written} of ${ins.totalSize} bytes); press Resume`);
+          }
+          s.inscriptions.markReadBack(key, true);
+          setVerified({ generation: net.generation, number, uri, bytes: content });
+        } catch (err) {
+          setVerifyError(errMsg(err));
         }
-        setResumable(null);
-        setVerified({ generation: net.generation, number, uri, bytes: content });
-      } catch (err) {
-        setVerifyError(errMsg(err));
-      }
-    })();
-  }, [record, insReview, net]);
+      })();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.inscriptionsTick, net]);
 
   const verifiedOk = !!verified && verified.generation === net?.generation && !!json.bytes && bytesEqual(verified.bytes, json.bytes);
 
@@ -576,11 +575,6 @@ export function ArtStep({
                   <button disabled={!payer || !json.bytes || maxFeeLamports === undefined || insBusy || s.sendPending} onClick={() => void buildInscribe()} data-testid="inscribe-review">
                     {insBusy ? "Planning and simulating..." : "Review inscription"}
                   </button>
-                  {resumable && (
-                    <button disabled={!payer || insBusy || s.sendPending} onClick={() => void buildResume()} data-testid="inscribe-resume">
-                      Resume #{resumable.number.toString()}
-                    </button>
-                  )}
                   {!payer && <span className="small muted">Connect a wallet to inscribe.</span>}
                 </div>
               )}
@@ -592,6 +586,40 @@ export function ArtStep({
           {insReview && <ReviewPanel s={s} review={insReview} onClose={() => setInsReview(null)} />}
         </div>
       )}
+
+      {(resume.ready.length > 0 || resume.blocked.length > 0) && (
+        <div className="resume" data-testid="inscribe-resume-section">
+          <p className="small">Unfinished inscription upload{resume.ready.length + resume.blocked.length === 1 ? "" : "s"}:</p>
+          {resume.ready.map((r) => (
+            <div key={r.upload.id} className="row wrap">
+              <button disabled={!payer || insBusy || s.sendPending} onClick={() => void buildResume(r)} data-testid="inscribe-resume">
+                Resume #{r.number.toString()}
+              </button>
+              <span className="small muted">
+                Sends only what is missing, after every one of its {r.attempts.length} earlier transaction{r.attempts.length === 1 ? "" : "s"} has confirmed or
+                expired.
+              </span>
+            </div>
+          ))}
+          {resume.blocked.map((b, i) => (
+            <div key={`${b.number}-${i}`} className="resume-blocked" data-testid="resume-blocked">
+              <button disabled data-testid="inscribe-resume-disabled">
+                Resume #{b.number}
+              </button>
+              <p className="warn small">
+                Resume is off for #{b.number}. {b.reason} Resuming without the full history could write a chunk twice and seal the wrong JSON. {RESUME_BLOCKED_ADVICE}
+              </p>
+              {b.marker && (
+                <button className="link small" onClick={() => s.inscriptions.forgetForeign(b.marker!)} data-testid="forget-resume-note">
+                  hide this note
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {mode !== "inscribe" && insError !== null && <FriendlyError err={insError} cluster={net?.cluster} testId="inscribe-error" />}
+      {mode !== "inscribe" && insReview && <ReviewPanel s={s} review={insReview} onClose={() => setInsReview(null)} />}
 
       {result.state === "pending" && (
         <p className="small warn-text" data-testid="art-pending">

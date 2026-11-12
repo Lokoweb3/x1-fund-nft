@@ -1,5 +1,6 @@
 import type { AppState } from "../App";
 import type { Review } from "../lib/actions";
+import { staleResumeReason } from "../lib/inscriptions";
 
 /**
  * Human-readable review of a simulated plan, then "Sign & send". The button
@@ -36,6 +37,8 @@ export function ReviewPanel({ s, review, onClose }: { s: AppState; review: Revie
     blockers.push(`The active signer is not the payer this review was built for (${review.payer.toBase58()}). Build it again.`);
   }
   if (s.sendPending && !mine) blockers.push("Another send is in progress.");
+  const stale = staleResumeReason(s.inscriptions, review, s.net?.genesisHash);
+  if (stale) blockers.push(stale);
   if (review.signerEpoch === undefined || review.signerEpoch !== s.live().signerEpoch) {
     blockers.push("The wallet connection changed since this review was built (connect, disconnect, account or wallet). Build it again.");
   }

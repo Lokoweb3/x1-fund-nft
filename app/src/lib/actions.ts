@@ -30,6 +30,7 @@ import {
   type CreateFundArgs,
   type MintMeta,
   type Plan,
+  type SubmitHook,
   type TxOutcome,
 } from "@core/owner.js";
 import {
@@ -114,7 +115,18 @@ export interface Review {
   /** Shown after a successful send (e.g. the new fund PDA and NFT mint). */
   created?: { fund: PublicKey; nftMint: PublicKey };
   /** For an inscription review: what it writes, so the page can read it back after the send. */
-  inscribe?: { number: bigint; uri: string; content: Uint8Array; contentType: string };
+  inscribe?: {
+    number: bigint;
+    uri: string;
+    content: Uint8Array;
+    contentType: string;
+    /**
+     * For a resume: how many attempts of this upload the app's registry held
+     * when the review was planned. If more were sent since, the plan is stale
+     * and the review cannot send.
+     */
+    historyLen?: number;
+  };
 }
 
 interface Prepared {
@@ -504,6 +516,7 @@ export async function reviewInscribeResume(
   content: Uint8Array,
   priorAttempts: PriorAttempt[],
 ): Promise<Review> {
+  const historyLen = priorAttempts.length;
   const plan = await prepareInscribeResume(net.connection, { payer, number, content, contentType: "application/json", priorAttempts });
   const rows: Row[] = plan.txs.map((t, i): Row => [`tx ${i + 1}`, t.label]);
   return finishReview(
@@ -514,7 +527,7 @@ export async function reviewInscribeResume(
       plan,
       rows,
       sentences: [`This finishes inscription #${number}: it re-read what is already on chain and sends only the missing part (${plan.txs.length} transaction${plan.txs.length === 1 ? "" : "s"}).`],
-      inscribe: { number, uri: inscriptionUri(number), content, contentType: "application/json" },
+      inscribe: { number, uri: inscriptionUri(number), content, contentType: "application/json", historyLen },
     },
     { program: "inscriptions" },
   );
@@ -537,6 +550,8 @@ export async function signAndSend(input: {
   mainnetAck: boolean;
   getLive: () => SessionKey;
   log?: (line: string) => void;
+  /** Passed to sendPlan: called synchronously right before each broadcast. */
+  onSubmit?: SubmitHook;
 }): Promise<TxOutcome[]> {
   const { net, review, signer } = input;
   if (!review.simOk) throw new Error("every simulation must pass before sending");
@@ -583,5 +598,6 @@ export async function signAndSend(input: {
     rpcUrl: net.rpcUrl,
     log: input.log ?? (() => {}),
     guard: sessionGuard(expected, input.getLive),
+    onSubmit: input.onSubmit,
   });
 }
