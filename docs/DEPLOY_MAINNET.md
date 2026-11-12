@@ -82,34 +82,49 @@ Run this after the deploy has been verified. Use the owner's own wallet and smal
 ```sh
 cd ~/X1_PROJECTS/X1_FundNFT/keeper
 npm ci
-export RPC_URL=https://rpc.mainnet.x1.xyz
-OWNER=<owner wallet pubkey>
-OWNER_KEYPAIR=<path to the owner's keypair>
-USDC=B69chRzqzDCmdB5WYB8NRu5Yv5ZA95ABiZcdzCgGm9Tq
-TEST=C9P839X3i1ijPyCvHEg3HpbEVjBLHJdxGXjez3yVn3Rz
-POOL=7drPqaqcXcyYmdo62xucGqZzALuPCbGBCXCT41nWMmQD
-SEND="--send --cluster mainnet --i-understand-mainnet"
+export RPC_URL='https://rpc.mainnet.x1.xyz'
+# REPLACE with the owner's wallet address (base58 pubkey).
+OWNER='REPLACE_WITH_OWNER_PUBKEY'
+# REPLACE with the absolute path to the owner's keypair file.
+OWNER_KEYPAIR='/absolute/path/to/owner.json'
+USDC='B69chRzqzDCmdB5WYB8NRu5Yv5ZA95ABiZcdzCgGm9Tq'
+TEST='C9P839X3i1ijPyCvHEg3HpbEVjBLHJdxGXjez3yVn3Rz'
+POOL='7drPqaqcXcyYmdo62xucGqZzALuPCbGBCXCT41nWMmQD'
+SEND=(--send --cluster mainnet --i-understand-mainnet)
+test -f "$OWNER_KEYPAIR" || echo "OWNER_KEYPAIR is not a file: fix it before continuing"
+# Every send also passes --payer "$OWNER", so the CLI refuses if KEYPAIR is another key.
 
 # 1. Simulate create-fund. No keypair is loaded. Check the bounds, the pool
 #    check, the summary, and "simulation: ok" for both transactions.
-npx tsx src/cli.ts create-fund --quote $USDC \
-  --target $USDC:default:2000 --target $TEST:$POOL:8000 \
-  --per-run 100000 --interval 3600 --window 3600 --max-dev-bps 300 --payer $OWNER
+npx tsx src/cli.ts create-fund --quote "$USDC" \
+  --target "$USDC:default:2000" --target "$TEST:$POOL:8000" \
+  --per-run 100000 --interval 3600 --window 3600 --max-dev-bps 300 --payer "$OWNER"
 
-# 2. Create a small fund. The NFT mint is new on every run, so copy the
-#    printed fund PDA from this run.
-KEYPAIR=$OWNER_KEYPAIR npx tsx src/cli.ts create-fund --quote $USDC \
-  --target $USDC:default:2000 --target $TEST:$POOL:8000 \
-  --per-run 100000 --interval 3600 --window 3600 --max-dev-bps 300 $SEND
-FUND=<fund PDA printed above>
+# 2. Create a small fund. The NFT mint is new on every run, so copy the fund
+#    PDA printed by this run. This is two transactions, not one atomic step:
+#    create_fund + quote vault, then the target vaults. If the second is not
+#    sent, the output lists what did confirm and prints the ensure-vaults
+#    command to run next (step 2b).
+KEYPAIR="$OWNER_KEYPAIR" npx tsx src/cli.ts create-fund --quote "$USDC" \
+  --target "$USDC:default:2000" --target "$TEST:$POOL:8000" \
+  --per-run 100000 --interval 3600 --window 3600 --max-dev-bps 300 \
+  --payer "$OWNER" "${SEND[@]}"
+# REPLACE with the fund PDA printed above.
+FUND='REPLACE_WITH_FUND_PDA'
+
+# 2b. Create any missing quote/target vault ATAs. Idempotent: if step 2
+#     completed it only reports that every vault exists.
+npx tsx src/cli.ts ensure-vaults --fund "$FUND" --payer "$OWNER"
+KEYPAIR="$OWNER_KEYPAIR" npx tsx src/cli.ts ensure-vaults --fund "$FUND" --payer "$OWNER" "${SEND[@]}"
 
 # 3. Deposit a small amount (1 USDC.X = 1000000 raw). Simulate, then send.
-npx tsx src/cli.ts deposit --fund $FUND --amount 1000000 --payer $OWNER
-KEYPAIR=$OWNER_KEYPAIR npx tsx src/cli.ts deposit --fund $FUND --amount 1000000 $SEND
+npx tsx src/cli.ts deposit --fund "$FUND" --amount 1000000 --payer "$OWNER"
+KEYPAIR="$OWNER_KEYPAIR" npx tsx src/cli.ts deposit --fund "$FUND" --amount 1000000 \
+  --payer "$OWNER" "${SEND[@]}"
 
 # 4. Show: budgets 0.2 cash / 0.8 TEST, the TEST target "due now", the
 #    quote vault at 1 USDC.X and the TEST vault at 0.
-npx tsx src/cli.ts show --fund $FUND
+npx tsx src/cli.ts show --fund "$FUND"
 
 # 5. Crank: the keeper dry-run must list this fund's TEST target and print
 #    the execute_dca accounts. Whether the keeper sends on mainnet is the
@@ -117,10 +132,11 @@ npx tsx src/cli.ts show --fund $FUND
 env -u KEYPAIR npx tsx src/index.ts --dry-run
 
 # 6. Withdraw. Quote first; a quote withdraw shrinks the budgets in
-#    proportion. After a crank, withdraw TEST the same way with --mint $TEST.
-npx tsx src/cli.ts withdraw --fund $FUND --mint $USDC --amount all --payer $OWNER
-KEYPAIR=$OWNER_KEYPAIR npx tsx src/cli.ts withdraw --fund $FUND --mint $USDC --amount all $SEND
-npx tsx src/cli.ts show --fund $FUND
+#    proportion. After a crank, withdraw TEST the same way with --mint "$TEST".
+npx tsx src/cli.ts withdraw --fund "$FUND" --mint "$USDC" --amount all --payer "$OWNER"
+KEYPAIR="$OWNER_KEYPAIR" npx tsx src/cli.ts withdraw --fund "$FUND" --mint "$USDC" --amount all \
+  --payer "$OWNER" "${SEND[@]}"
+npx tsx src/cli.ts show --fund "$FUND"
 ```
 
 Before the deploy, step 1 fails with `program 6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM is not deployed on this RPC (https://rpc.mainnet.x1.xyz, mainnet)`. The CLI reaches that point only after the local bound checks and the pool check have passed.
