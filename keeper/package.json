@@ -5,7 +5,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "keeper": "tsx src/index.ts",
-    "test": "tsx --test test/*.test.ts"
+    "cli": "tsx src/cli.ts",
+    "test": "tsx --test test/*.test.ts",
+    "e2e": "bash test/e2e-local.sh"
   },
   "dependencies": {
     "@anchor-lang/core": "1.2.2",
