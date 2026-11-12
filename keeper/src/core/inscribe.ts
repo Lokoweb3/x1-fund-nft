@@ -561,12 +561,18 @@ export function planInscribe(input: InscribeInput): InscribePlan {
 }
 
 /**
- * Finish an inscription whose first transactions landed but whose later
- * appends did not (or whose status is unknown). It re-reads the account and
- * checks the creator, writer, size, type, encoding and every byte already
- * written against `content`. Then it plans only the missing appends, plus
- * the thaw. It refuses on any mismatch, so the call never appends twice or
- * appends to someone else's inscription.
+ * Plan the missing appends (plus the thaw) of an inscription whose first
+ * transactions landed, from a SNAPSHOT of the account. It checks the creator,
+ * writer, size, type, encoding and every byte already written against
+ * `content`, and refuses on any mismatch.
+ *
+ * A snapshot alone is not enough to resume safely: `append` takes only bytes,
+ * not an expected offset, so an earlier append that is still in flight and
+ * lands after the snapshot would make a resumed append write the same bytes
+ * twice and seal wrong content. Only call this through
+ * `prepareInscribeResume`, which first proves every earlier attempt is
+ * resolved (confirmed, or its blockhash expired) and only then reads the
+ * account. Never run two uploads of the same inscription at once.
  */
 export function planInscribeResume(input: {
   payer: PublicKey;
@@ -645,15 +651,78 @@ export async function prepareInscribe(
   const plan = planInscribe({ ...input, config });
   // A stale RPC node could report an n that is already taken. Planning it would
   // only fail on chain, but refusing here gives a clearer error.
+  // Anyone can send lamports to the public PDA, leaving a System-owned account
+  // with no data; that is not an inscription and does not mean the config is
+  // stale. Only an account owned by the inscriptions program counts as taken.
   const existing = await connection.getAccountInfo(plan.inscription, "confirmed");
-  if (existing) throw new Error(`inscription #${plan.number} already exists; the RPC's config is stale. Nothing was simulated or sent.`);
+  const programId = input.programId ?? INSCRIPTION_PROGRAM_ID;
+  if (existing && existing.owner.equals(programId)) {
+    throw new Error(`inscription #${plan.number} already exists; the RPC's config is stale. Nothing was simulated or sent.`);
+  }
+  if (existing && !(existing.owner.equals(SystemProgram.programId) && existing.data.length === 0)) {
+    throw new Error(
+      `the account for inscription #${plan.number} (${plan.inscription.toBase58()}) is owned by ${existing.owner.toBase58()} with ${existing.data.length} bytes; refusing. Nothing was simulated or sent.`,
+    );
+  }
   return plan;
 }
 
+/** An earlier transaction of this upload whose outcome must be settled before resuming. */
+export interface PriorAttempt {
+  signature: string;
+  /** From the PlanSendError (or the blockhash it was signed with). */
+  lastValidBlockHeight: number;
+}
+
+/** The RPC calls resume needs on top of AccountReader; `Connection` satisfies it. */
+export interface ResumeReader extends AccountReader {
+  getSignatureStatuses(
+    signatures: string[],
+    config: { searchTransactionHistory: boolean },
+  ): Promise<{ value: ({ confirmationStatus?: string | null; err: unknown } | null)[] }>;
+  getBlockHeight(commitment: "confirmed"): Promise<number>;
+}
+
+/**
+ * Refuse unless every earlier attempt can no longer land: it is confirmed
+ * (or finalized), landed and failed, or its blockhash has expired (the
+ * cluster's confirmed block height is past its last valid height). Only then
+ * is a fresh read of the account safe to plan from.
+ */
+export async function assertAttemptsSettled(connection: ResumeReader, attempts: PriorAttempt[]): Promise<void> {
+  if (attempts.length === 0) return;
+  const statuses = (await connection.getSignatureStatuses(attempts.map((a) => a.signature), { searchTransactionHistory: true })).value;
+  const height = await connection.getBlockHeight("confirmed");
+  const open: string[] = [];
+  attempts.forEach((a, i) => {
+    const st = statuses[i];
+    const settled = st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized");
+    if (!settled && height <= a.lastValidBlockHeight) open.push(`${a.signature} (can land until block ${a.lastValidBlockHeight}, now ${height})`);
+  });
+  if (open.length > 0) {
+    throw new Error(
+      `not resuming yet: an earlier transaction may still land and append its bytes: ${open.join("; ")}. ` +
+        "Wait until it confirms or its blockhash expires (about a minute), then resume. Nothing was simulated or sent.",
+    );
+  }
+}
+
 export async function prepareInscribeResume(
-  connection: AccountReader,
-  input: { payer: PublicKey; number: bigint; content: Uint8Array; contentType: string; encoding?: number; budget?: TransactionInstruction[]; programId?: PublicKey },
+  connection: ResumeReader,
+  input: {
+    payer: PublicKey;
+    number: bigint;
+    content: Uint8Array;
+    contentType: string;
+    encoding?: number;
+    budget?: TransactionInstruction[];
+    programId?: PublicKey;
+    /** Every earlier transaction of this upload that was signed and may have been submitted. Required, may be empty only if none were. */
+    priorAttempts: PriorAttempt[];
+  },
 ): Promise<Plan> {
+  await assertAttemptsSettled(connection, input.priorAttempts);
+  // Read only after every earlier attempt is settled.
   const inscription = await fetchInscription(connection, input.number, input.programId);
   if (!inscription) throw new Error(`inscription #${input.number} does not exist; its inscribe transaction did not land`);
   return planInscribeResume({ ...input, inscription });

@@ -33,6 +33,7 @@ import {
   nftAuthPda,
   planInscribe,
   planInscribeResume,
+  assertAttemptsSettled,
   prepareInscribe,
   thawInscriptionIx,
   type AccountReader,
@@ -385,4 +386,49 @@ test("decodeInscription: a growing (unfinished) inline account", () => {
   assert.equal(ins.written, 600);
   assert.deepEqual(Buffer.from(ins.content), Buffer.from(content.subarray(0, 600)));
   assert.throws(() => decodeInscription(account.slice(0, 212 + 599)), /says 600 bytes are written/);
+});
+
+test("prepareInscribe: a prefunded, empty, System-owned next PDA is not 'taken' (codex r: SF3)", async () => {
+  const cfg = fixture("x1-inscriptions-config.json");
+  const accounts = new Map([[cfg.address, { owner: INSCRIPTION_PROGRAM_ID, data: cfg.data }]]);
+  accounts.set(inscriptionPda(67n).toBase58(), { owner: SystemProgram.programId, data: new Uint8Array(0) });
+  const p = await prepareInscribe(reader(accounts), { payer, content: json(700), contentType: "application/json", maxFee: 500_000_000n });
+  assert.equal(p.number, 67n);
+  accounts.set(inscriptionPda(67n).toBase58(), { owner: Keypair.generate().publicKey, data: new Uint8Array(8) });
+  await assert.rejects(
+    prepareInscribe(reader(accounts), { payer, content: json(700), contentType: "application/json", maxFee: 500_000_000n }),
+    /refusing/,
+  );
+});
+
+function statusReader(statuses: ({ confirmationStatus: string; err: unknown } | null)[], height: number) {
+  return {
+    async getAccountInfo() {
+      return null;
+    },
+    async getSignatureStatuses() {
+      return { value: statuses };
+    },
+    async getBlockHeight() {
+      return height;
+    },
+  };
+}
+
+test("resume waits until every earlier attempt is settled (codex r: SF1)", async () => {
+  const a = { signature: "sigA", lastValidBlockHeight: 1000 };
+  // Unknown and its blockhash still valid: it can still land, so refuse.
+  await assert.rejects(assertAttemptsSettled(statusReader([null], 1000), [a]), /not resuming yet/);
+  await assert.rejects(assertAttemptsSettled(statusReader([{ confirmationStatus: "processed", err: null }], 999), [a]), /not resuming yet/);
+  // Expired blockhash: it can never land.
+  await assertAttemptsSettled(statusReader([null], 1001), [a]);
+  // Confirmed, either succeeded or failed on chain: outcome known.
+  await assertAttemptsSettled(statusReader([{ confirmationStatus: "confirmed", err: null }], 10), [a]);
+  await assertAttemptsSettled(statusReader([{ confirmationStatus: "finalized", err: { InstructionError: [0, "x"] } }], 10), [a]);
+  // Mixed: one settled, one open -> refuse and name the open one.
+  await assert.rejects(
+    assertAttemptsSettled(statusReader([{ confirmationStatus: "confirmed", err: null }, null], 5), [a, { signature: "sigB", lastValidBlockHeight: 9 }]),
+    /sigB/,
+  );
+  await assertAttemptsSettled(statusReader([], 0), []);
 });

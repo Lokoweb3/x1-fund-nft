@@ -632,6 +632,13 @@ export class PlanSendError extends Error {
     readonly state: FailedTxState,
     /** Signature of the failed transaction, when it was signed. */
     readonly signature: string | undefined,
+    /**
+     * Last block height at which the failed transaction can still land, when
+     * it may have been submitted. A transaction whose status is unknown must
+     * not be retried or worked around until it is confirmed or this height
+     * has passed.
+     */
+    readonly lastValidBlockHeight?: number,
   ) {
     super(message);
     this.name = "PlanSendError";
@@ -676,8 +683,8 @@ export async function sendPlan(input: {
   const log = input.log ?? ((line: string) => console.log(line));
   const total = plan.txs.length;
   const done: TxOutcome[] = [];
-  const fail = (i: number, what: string, state: FailedTxState, signature?: string) =>
-    new PlanSendError(partialFailureMessage(plan, done, i, what, state), [...done], i, state, signature);
+  const fail = (i: number, what: string, state: FailedTxState, signature?: string, lastValid?: number) =>
+    new PlanSendError(partialFailureMessage(plan, done, i, what, state), [...done], i, state, signature, lastValid);
   for (const [i, tx] of plan.txs.entries()) {
     let blockhash: string;
     let lastValidBlockHeight: number;
@@ -715,7 +722,7 @@ export async function sendPlan(input: {
           ? `${signature} was refused by the RPC before landing: ${errText(err)}`
           : `${signature} may have been submitted; its status is unknown: ${errText(err)}. ` +
             `Check it with: solana confirm -v ${signature} --url ${shellQuote(rpcUrl)} before retrying.`;
-      throw fail(i, what, state, signature);
+      throw fail(i, what, state, signature, state === "unknown" ? lastValidBlockHeight : undefined);
     }
     let result: { value: { err: unknown } };
     try {
@@ -727,6 +734,7 @@ export async function sendPlan(input: {
           `Check it with: solana confirm -v ${signature} --url ${shellQuote(rpcUrl)} before retrying.`,
         "unknown",
         signature,
+        lastValidBlockHeight,
       );
     }
     if (result.value.err) {

@@ -83,11 +83,15 @@ The account is 184 bytes. The `set_genesis_settings` doc comment says it adds 14
 
 ## Race safety
 
-If someone else inscribes between our config read and our transaction 1, the config's `next_inscription` has moved on. The PDAs in our transaction then no longer match the seeds, so Anchor fails the transaction with `ConstraintSeeds` (2006). Nothing is created, and no fee or rent is charged. With preflight on (sendPlan's setting), the RPC rejects it before it lands, so not even the network fee is spent. Sent with skipPreflight, it would land, fail, and cost only the network fee. `sendPlan` stops at the first failure, so no `append` is sent. An `append` to #n also checks that #n's writer signed (`ConstraintHasOne`, 2001). The plan therefore cannot write into anyone else's inscription, and it never writes to a number other than the one it predicted.
+If someone else inscribes between our config read and our transaction 1, the config's `next_inscription` has moved on. The PDAs in our transaction then no longer match the seeds, so Anchor fails the transaction with `ConstraintSeeds` (2006). Nothing is created, and no fee or rent is charged. If preflight (sendPlan's setting) catches it, the RPC rejects it before it lands and not even the network fee is spent. Another inscription can also win after preflight and before execution; then the transaction lands, fails, and costs only the network fee. Sent with skipPreflight, the same. `sendPlan` stops at the first failure, so no `append` is sent. An `append` to #n also checks that #n's writer signed (`ConstraintHasOne`, 2001). The plan therefore cannot write into anyone else's inscription, and it never writes to a number other than the one it predicted.
 
 The local e2e test shows this. Two plans are made from the same config read, both predicting #67. The first one lands. The second fails at transaction 1 with 0x7d6, and the rival's balance is unchanged. The rival's stray `append` to #67, sent on its own, fails with 0x7d1. #67 still holds the first payer's bytes.
 
 On such a failure, read the config again and plan again. The new plan gets the next number and a new uri.
+
+## Resuming an unfinished upload safely
+
+`append` takes only bytes, with no expected offset. If an earlier append's status is unknown (lost response, timeout) it may still land later, and a resumed append planned from an older snapshot would then write the same bytes twice and seal wrong content into an inscription that has already been paid for. So `prepareInscribeResume` requires `priorAttempts`: every earlier transaction of this upload that was signed and may have been submitted, each with its `lastValidBlockHeight` (carried by `PlanSendError`). It refuses until each one is confirmed (landed, succeeded or failed) or its blockhash has expired (the cluster's confirmed block height is past it), and only then reads the account. In practice: after an unknown-status failure, wait about a minute and resume. Never run two uploads of the same inscription at the same time. The e2e test covers this race: it holds a signed append, shows resume refusing, lets the old append land late, and then shows resume planning only what is really missing.
 
 ## Fee model and max_fee
 
@@ -100,7 +104,7 @@ What the payer pays for one inscription (simulated on mainnet for a 1536-byte JS
 | Core asset | 6,483,360 after tx 1 (588 bytes). 6,406,800 after thaw (545 bytes) | 4,983,360 is rent-exemption for 588 bytes. The other 1,500,000 matches Metaplex Core's create fee, which Core keeps in the asset account. That attribution is an inference |
 | network fees | 1,201,500 + 201,500 + 1,001,500 = 2,404,500 with the default compute limits | validators |
 
-The total is about 0.522 XNT. On the local validator, where the network fee is 5,000 per transaction, the payer spent 519,478,784 lamports.
+The total is about 0.522 XNT. On the local validator, where the network fee is 5,000 per transaction, the payer spent about 519.48 million lamports. That figure is approximate: the test payer is the validator mint with a balance above 2^53 lamports, and web3.js returns balances as JavaScript numbers, which round at that size (the exact sum of the parts is 519,478,760).
 
 `max_fee` protection: the program refuses with `FeeChanged` (6069, "The fee changed since you looked") if `config.fees.inscribe` is above `max_fee`. The e2e test checks this: `max_fee = fee - 1` is refused and nothing is created. `planInscribe` sends `max_fee` = the fee it just read, not the caller's cap. Any increase before the transaction lands is therefore refused on chain. `planInscribe` also refuses up front if the fee it read is above the caller's `maxFee`.
 
@@ -191,8 +195,9 @@ The first real fund-metadata inscription should be followed by a check of `curl 
 3. **Metaplex Core** (`CoREENxT...`) is also an upgradeable program on X1. The inscription's NFT depends on it. The fund NFT's metadata does not.
 4. **The gateway is off-chain HTTP.** `x1ins.xyz` and `www.x1inscriptions.io` are operated by the same third party (served by Vercel). They can go down, change their URL scheme, rewrite content types (as with text/html served as text/plain), filter content (the site describes a "scam scan" for pages), or serve bytes that differ from the chain. The fund NFT's `uri` is only as available as that domain. The bytes on chain stay readable by anyone with an RPC (`fetchInscription`), but wallets follow the URL, not the chain.
 5. **The predicted number is a prediction.** It is safe (see "Race safety") but not guaranteed. The metadata uri can only be set on the fund NFT after the inscription lands at a known n.
-6. **The IDL comes from the site's bundle** and was cross-checked with the on-chain IDL account. Both are published by the same operator. Neither proves what the deployed bytecode does; the local e2e test does that, for the version cloned at test time.
+6. **The IDL comes from the site's bundle** and was cross-checked with the on-chain IDL account. Both are published by the same operator. Neither proves what the deployed bytecode does. The local e2e test shows what the cloned version does on the paths it exercises, nothing more.
 7. **Fees go to the third party's treasury and genesis pool.** That is 0.5 XNT per inscription at today's config.
+8. **Signing exposes the paying wallet's whole XNT balance, not just the price.** Every inscribe, append and thaw gives this upgradeable program the payer as a writable signer, plus the System Program (and inscribe also reaches Metaplex Core). A malicious upgrade could move the payer's entire available balance; `max_fee` only bounds the fee the current program charges and does not exist at all on append and thaw. **Inscribe from a separate wallet funded with little more than the expected cost (about 0.53 XNT).** The fund NFT's holder does not need to be the inscription's payer: any wallet can create the inscription, and the holder then points the NFT's uri at it. This program never receives a fund PDA signature or any fund vault, so this is wallet exposure, not fund-vault custody.
 
 ## Tests
 
