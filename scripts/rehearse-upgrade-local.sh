@@ -201,7 +201,8 @@ AUTH_KEY="$WORK/upgrade-auth.json" # upgrade authority (the owner's DEPLOYER on 
 HOLDER2_KEY="$WORK/holder2.json"   # receives the NFT at the end
 SECOND_KEY="$WORK/second-program.json" # a second instance for the auto-extend check
 THIRD_KEY="$WORK/third-program.json"   # a third instance for the upgrade script's extend path
-for k in "$PAYER_KEY" "$AUTH_KEY" "$HOLDER2_KEY" "$SECOND_KEY" "$THIRD_KEY"; do
+FOURTH_KEY="$WORK/fourth-program.json" # unknown code of the old size: must be refused
+for k in "$PAYER_KEY" "$AUTH_KEY" "$HOLDER2_KEY" "$SECOND_KEY" "$THIRD_KEY" "$FOURTH_KEY"; do
   solana-keygen new --no-bip39-passphrase --silent --force -o "$k" >/dev/null || die "keygen $k"
 done
 PAYER="$(solana-keygen pubkey "$PAYER_KEY")"
@@ -209,6 +210,17 @@ AUTH="$(solana-keygen pubkey "$AUTH_KEY")"
 HOLDER2="$(solana-keygen pubkey "$HOLDER2_KEY")"
 SECOND_ID="$(solana-keygen pubkey "$SECOND_KEY")"
 THIRD_ID="$(solana-keygen pubkey "$THIRD_KEY")"
+FOURTH_ID="$(solana-keygen pubkey "$FOURTH_KEY")"
+# Same size as the mainnet build, one byte different (an error-message string).
+TAMPERED_SO="$WORK/tampered-old.so"
+python3 -I - "$OLD_SO" "$TAMPERED_SO" <<'PY' || die "make tampered .so"
+import sys
+d = open(sys.argv[1], "rb").read()
+needle = b"Arithmetic overflow"
+assert d.count(needle) >= 1
+open(sys.argv[2], "wb").write(d.replace(needle, b"Arithmetic overfloW", 1))
+PY
+[ "$(stat -c %s "$TAMPERED_SO")" = "$OLD_LEN" ] && [ "$(sha "$TAMPERED_SO")" != "$OLD_SHA" ] || die "tampered .so is not same-size different-hash"
 [ -n "$PAYER" ] && [ -n "$AUTH" ] && [ -n "$HOLDER2" ] && [ -n "$SECOND_ID" ] && [ -n "$THIRD_ID" ] || die "empty pubkeys"
 solana -C "$CFG" config set --url "$URL" --keypair "$PAYER_KEY" >/dev/null || die "config"
 echo "payer $PAYER, upgrade authority $AUTH, second holder $HOLDER2, second program $SECOND_ID"
@@ -252,6 +264,7 @@ start_validator -C "$CFG" --mint "$PAYER" --reset --quiet \
   --upgradeable-program "$PROGRAM_ID" "$OLD_SO" "$AUTH" \
   --upgradeable-program "$SECOND_ID" "$OLD_SO" "$AUTH" \
   --upgradeable-program "$THIRD_ID" "$OLD_SO" "$AUTH" \
+  --upgradeable-program "$FOURTH_ID" "$TAMPERED_SO" "$AUTH" \
   --url "$MAINNET_RPC" \
   --clone-upgradeable-program "$TOKENKEG" --clone-upgradeable-program "$TOKEN_2022" \
   --clone-upgradeable-program "$XDEX" --clone-upgradeable-program "$METAPLEX" \
@@ -472,6 +485,33 @@ else
   grep -q "must be loopback" "$OUT" && pass "local mode refuses a non-loopback URL" || fail "non-loopback refusal text"
 fi
 
+echo; echo "== upgrade script: the on-chain code is authenticated"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$FOURTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "unknown same-size code at $OLD_LEN is refused" fail check
+expect_out "unknown code named" "FAIL: on-chain code \(unknown, $OLD_LEN bytes\) at data length $OLD_LEN"
+solana -C "$CFG" program extend "$FOURTH_ID" "$DELTA" --keypair "$AUTH_KEY" >/dev/null 2>&1 &&
+  pass "fourth: extended to $NEW_LEN" || fail "fourth: extend"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$FOURTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "unknown code at $NEW_LEN (not new, not old + zeros) is refused" fail check
+expect_out "unknown padded code named" "FAIL: on-chain code \(unknown, [0-9]+ bytes\) at data length $NEW_LEN"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$FOURTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "apply on unknown code sends nothing" fail apply --i-understand-mainnet
+if grep -Eq "extending ProgramData|deploying " "$OUT"; then fail "apply on unknown code tried to send"; else pass "apply on unknown code did not extend or deploy"; fi
+# A failing `program dump`: a solana wrapper that fails only that subcommand.
+FAKEBIN="$WORK/fakebin"
+mkdir -p -- "$FAKEBIN"
+printf '#!/usr/bin/env bash\nfor a in "$@"; do [ "$a" = dump ] && { echo "simulated dump failure" >&2; exit 1; }; done\nexec %q "$@"\n' \
+  "$SOLANA_BIN_DIR/solana" >"$FAKEBIN/solana"
+chmod +x "$FAKEBIN/solana"
+ln -s "$SOLANA_BIN_DIR/solana-keygen" "$FAKEBIN/solana-keygen"
+if (TMPDIR="$WORK" UPGRADE_TARGET=local UPGRADE_URL="$URL" UPGRADE_AUTHORITY="$AUTH" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+     SOLANA_BIN_DIR="$FAKEBIN" bash "$UPGRADER" check >"$OUT" 2>&1); then
+  fail "check passed although program dump failed"
+else
+  grep -q "program dump $PROGRAM_ID failed: the on-chain code cannot be authenticated" "$OUT" &&
+    pass "a failed program dump is refused" || fail "dump failure refusal text"
+fi
+sed 's/^/    /' "$OUT"
+BOGUS_ID="$(solana-keygen pubkey "$PAYER_KEY")"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$BOGUS_ID" UPGRADE_SKIP_BUILD=1 upgrader "a program id that is not a program is refused" fail check
+
 echo; echo "== upgrade script on a third instance: apply from the old length extends, then deploys"
 DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$THIRD_ID" UPGRADE_SKIP_BUILD=1 upgrader "third: apply (extend + deploy)" ok apply --i-understand-mainnet
 expect_out "third: state was extend" "data length $OLD_LEN: extend by $DELTA bytes"
@@ -505,6 +545,7 @@ run_fail "$PAYER_KEY" "after extend, before deploy, withdraw_native is still unk
 AUTH_BEFORE="$(lamports_of "$AUTH")"
 DEPLOYER="$AUTH_KEY" upgrader "apply after the extend (reruns check with a fresh build, deploys)" ok apply --i-understand-mainnet
 expect_out "apply sees the extended state" "already extended, not yet deployed\): no extend, deploy only"
+expect_out "dump after extend: full data length, old build + zero padding" "on-chain dump: $NEW_LEN bytes, sha256 [0-9a-f]+ \(old\+zero\)"
 expect_out "apply asserted the on-chain hash" "PASS: on-chain program hash is $NEW_SHA"
 if grep -q "extending ProgramData" "$OUT"; then fail "apply extended an already-extended program"; else pass "apply did not extend again"; fi
 echo "authority spent $((AUTH_BEFORE - $(lamports_of "$AUTH"))) lamports on apply after extend (fees only; buffer rent refunded)"
