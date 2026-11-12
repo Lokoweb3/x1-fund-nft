@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "keeper": "tsx src/index.ts"
+    "keeper": "tsx src/index.ts",
+    "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@anchor-lang/core": "1.2.2",

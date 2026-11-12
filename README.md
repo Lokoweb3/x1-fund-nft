@@ -35,13 +35,28 @@ Step-by-step build notes are in `docs/PROGRESS.md`. Deploy instructions for X1 t
 
 ## Keeper
 
-`keeper/` scans `Fund` accounts, skips targets that are not due, and builds `execute_dca` from the pinned pool account.
+`keeper/` scans `Fund` accounts (filtered by the account discriminator), skips targets that are not due, and builds `execute_dca` from the pinned pool account.
 
 ```sh
 cd keeper
-npm install
+npm ci
 npx tsc --noEmit
+npm test
 RPC_URL=https://rpc.mainnet.x1.xyz npx tsx src/index.ts --dry-run
 ```
 
-`--dry-run` prints the transaction and does not send it. A send also requires `KEYPAIR` pointing at a JSON keypair file, and the script refuses to send when `RPC_URL` contains `rpc.mainnet.x1.xyz`.
+`npm test` runs offline: it encodes a `Fund` account with the IDL's Borsh coder, decodes it through the keeper's decoder, checks due-target selection, and checks the cluster guard.
+
+`--dry-run` (or leaving `KEYPAIR` unset) prints the transactions and sends nothing; it needs no other flags. The keeper always calls `getGenesisHash` first, before any keypair is loaded, and maps the hash to `mainnet`, `testnet` or `localnet` (any hash that is not X1 mainnet or testnet). A send requires:
+
+- `KEYPAIR` pointing at a JSON keypair file;
+- `--cluster <mainnet|testnet|localnet>` matching the RPC's genesis hash, or the keeper refuses;
+- for mainnet, `--i-understand-mainnet` as well. Without it, an `RPC_URL` containing `rpc.mainnet.x1.xyz` is also refused.
+
+```sh
+KEYPAIR=/path/to/payer.json RPC_URL=https://rpc.testnet.x1.xyz npx tsx src/index.ts --cluster testnet
+```
+
+Each transaction starts with compute-budget instructions. `COMPUTE_UNIT_LIMIT` sets the unit limit (default 400000) and `PRIORITY_FEE_MICROLAMPORTS` sets the price per unit (default 0).
+
+A decode, build or send failure for one fund or target is logged with the fund address and target index, and the keeper continues with the rest. It exits non-zero if any item failed.
