@@ -590,12 +590,24 @@ extend_by "SIMD-0431: one byte short, raised to the minimum" $((NEW_LEN - 1)) ac
 extend_by "SIMD-0431: exactly the minimum missing" $((NEW_LEN - 10240)) active 10240
 extend_by "SIMD-0431: more than the minimum missing" $((NEW_LEN - 10241)) active 10241
 extend_by "SIMD-0431: already the new length" "$NEW_LEN" active 0
-if (TMPDIR="$WORK" UPGRADE_TARGET=local UPGRADE_URL="$URL" UPGRADE_AUTHORITY="$AUTH" SOLANA_BIN_DIR="$SOLANA_BIN_DIR" \
-     bash "$UPGRADER" extend-by "" inactive >"$OUT" 2>&1); then
-  fail "extend-by accepted an empty data length"
-else
-  grep -q "not a decimal integer" "$OUT" && pass "extend-by refuses an empty data length" || fail "extend-by empty-length refusal text"
-fi
+# extend_by_refused NAME LEN TEXT: extend-by must exit non-zero, print TEXT
+# and print no amount.
+extend_by_refused() {
+  local name="$1" len="$2" text="$3"
+  if (TMPDIR="$WORK" UPGRADE_TARGET=local UPGRADE_URL="$URL" UPGRADE_AUTHORITY="$AUTH" SOLANA_BIN_DIR="$SOLANA_BIN_DIR" \
+       bash "$UPGRADER" extend-by "$len" inactive >"$OUT" 2>&1); then
+    fail "extend-by accepted $name ('$len'): $(tr '\n' ' ' <"$OUT")"
+  elif grep -q "$text" "$OUT" && ! grep -Eq '^[0-9]+$' "$OUT"; then
+    pass "extend-by refuses $name ('$len')"
+  else
+    fail "extend-by $name ('$len'): refusal text: $(tr '\n' ' ' <"$OUT")"
+  fi
+}
+extend_by_refused "an empty data length" "" "not a decimal integer"
+extend_by_refused "a leading-zero data length (would be read as octal)" "0$OLD_LEN" "not a decimal integer"
+extend_by_refused "a data length of 2^64" 18446744073709551616 "not a decimal integer"
+extend_by_refused "a data length above 10 MiB" 10485761 "above the maximum 10485760"
+extend_by_refused "a negative data length" "-1" "not a decimal integer"
 
 echo; echo "== upgrade script: refusals"
 DEPLOYER="$HOLDER2_KEY" UPGRADE_SKIP_BUILD=1 upgrader "check with the wrong DEPLOYER key fails" fail check
@@ -638,6 +650,8 @@ fake_solana "$WORK/fakebin-feature-fail" feature 'echo "simulated feature status
 UPGRADER_BIN_DIR="$WORK/fakebin-feature-fail" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
   upgrader "check fails closed when feature status cannot be read" fail check
 expect_out "unreadable feature status named" "FATAL: solana feature status [1-9A-HJ-NP-Za-km-z]+ failed: cannot tell whether SIMD-0431"
+expect_out "the on-chain code was authenticated before the feature status read" \
+  "PASS: on-chain code authenticated \(old\): the current build $OLD_SHA \(state: extend\)"
 fake_solana "$WORK/fakebin-feature-empty" feature 'echo "{\"features\":[]}"; exit 0'
 UPGRADER_BIN_DIR="$WORK/fakebin-feature-empty" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
   upgrader "check fails closed when feature status has no status for SIMD-0431" fail check
@@ -650,6 +664,32 @@ fake_solana "$WORK/fakebin-balance" balance 'echo "lamports"; exit 0'
 UPGRADER_BIN_DIR="$WORK/fakebin-balance" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
   upgrader "check fails closed on unparsable balance output" fail check
 expect_out "unparsable balance named" "FATAL: solana balance [1-9A-HJ-NP-Za-km-z]+ --lamports returned 'lamports', not a decimal integer"
+# Numbers that parse but are not canonical or are out of range.
+fake_solana "$WORK/fakebin-rent-huge" rent 'echo "Rent-exempt minimum: 9223372036854775807 lamports"; exit 0'
+UPGRADER_BIN_DIR="$WORK/fakebin-rent-huge" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on a rent of 2^63-1 (the sum would wrap negative)" fail check
+expect_out "huge rent named" "FATAL: solana rent [0-9]+ --lamports returned '9223372036854775807', not a decimal integer"
+if grep -q "DEPLOYER balance" "$OUT"; then fail "huge rent reached the balance check"; else pass "huge rent never reached the balance check"; fi
+fake_solana "$WORK/fakebin-rent-zero" rent 'echo "Rent-exempt minimum: 02872343280 lamports"; exit 0'
+UPGRADER_BIN_DIR="$WORK/fakebin-rent-zero" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on a leading-zero rent" fail check
+expect_out "leading-zero rent named" "FATAL: solana rent [0-9]+ --lamports returned '02872343280', not a decimal integer"
+# `program show` (not `show --buffers`) with a rewritten .dataLen.
+fake_show() {
+  fake_solana "$1" show "case \" \$* \" in *\" --buffers \"*) ;; *) $(printf '%q' "$SOLANA_BIN_DIR/solana") \"\$@\" | sed -E 's/\"dataLen\": *[0-9]+/\"dataLen\": $2/'; exit 0 ;; esac"
+}
+fake_show "$WORK/fakebin-len-zero" "\\\"0$OLD_LEN\\\""
+UPGRADER_BIN_DIR="$WORK/fakebin-len-zero" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on a leading-zero data length" fail check
+expect_out "leading-zero data length named" "FATAL: solana program show [1-9A-HJ-NP-Za-km-z]+ \(.dataLen\) returned '0$OLD_LEN', not a decimal integer"
+fake_show "$WORK/fakebin-len-big" 10485761
+UPGRADER_BIN_DIR="$WORK/fakebin-len-big" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on a data length above 10 MiB" fail check
+expect_out "oversized data length named" "FATAL: solana program show [1-9A-HJ-NP-Za-km-z]+ \(.dataLen\) returned '10485761', above the maximum 10485760"
+fake_show "$WORK/fakebin-len-huge" "\\\"18446744073709551616\\\""
+UPGRADER_BIN_DIR="$WORK/fakebin-len-huge" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on a data length of 2^64" fail check
+expect_out "2^64 data length named" "FATAL: solana program show [1-9A-HJ-NP-Za-km-z]+ \(.dataLen\) returned '18446744073709551616', not a decimal integer"
 [ "$(programdata_len "$PROGRAM_ID")" = "$OLD_DATA_LEN" ] && pass "the fail-closed checks sent nothing" || fail "a fail-closed check changed the chain"
 BOGUS_ID="$(solana-keygen pubkey "$PAYER_KEY")"
 DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$BOGUS_ID" UPGRADE_SKIP_BUILD=1 upgrader "a program id that is not a program is refused" fail check

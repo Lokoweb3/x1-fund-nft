@@ -99,17 +99,27 @@ FEE_MARGIN=50000000
 SIMD_0431_FEATURE="YbbRLkvenrocjGPGyoQE4wjnvYzTgfsk38NFmcYK7a5"
 MIN_EXTEND_BYTES=10240
 
-# need_uint VALUE WHAT: die unless VALUE is a non-empty decimal integer, so
-# unparsed CLI output can never become 0 in arithmetic.
+# The largest account is 10 MiB, so no ProgramData length can exceed this.
+MAX_LEN=10485760
+# need_uint VALUE WHAT [MAX]: die unless VALUE is a canonical decimal integer
+# (0, or digits with no leading zero) of at most 18 digits and, if MAX is
+# given, at most MAX. So unparsed CLI output can never become 0, a leading
+# zero is never read as octal, and no sum of a few validated values can
+# overflow 64-bit shell arithmetic (3 * 10^18 < 2^63). Lengths pass MAX_LEN;
+# lamport amounts use the 18-digit bound.
 need_uint() {
-  [[ "$1" =~ ^[0-9]+$ ]] || die "$2 returned '$1', not a decimal integer; refusing"
+  [[ "$1" =~ ^(0|[1-9][0-9]{0,17})$ ]] ||
+    die "$2 returned '$1', not a decimal integer (canonical, at most 18 digits); refusing"
+  if [ $# -ge 3 ]; then
+    [ "$1" -le "$3" ] || die "$2 returned '$1', above the maximum $3; refusing"
+  fi
 }
 # extend_amount DATA_LEN active|inactive: how many bytes to extend ProgramData
 # by so the new build fits; 0 when it already fits. With SIMD-0431 active the
 # amount is raised to MIN_EXTEND_BYTES.
 extend_amount() {
   local len="$1" simd="$2" by
-  need_uint "$len" "extend_amount: data length"
+  need_uint "$len" "extend_amount: data length" "$MAX_LEN"
   case "$simd" in active|inactive) ;; *) die "extend_amount: SIMD-0431 status '$simd' is not active or inactive" ;; esac
   if [ "$len" -ge "$NEW_LEN" ]; then echo 0; return 0; fi
   by=$((NEW_LEN - len))
@@ -172,7 +182,7 @@ data_len_now() {
   local show len
   show="$(show_json)" || die "solana program show $PROGRAM_ID failed"
   len="$(jq -r '.dataLen' <<<"$show")" || die "cannot parse solana program show $PROGRAM_ID"
-  need_uint "$len" "solana program show $PROGRAM_ID (.dataLen)"
+  need_uint "$len" "solana program show $PROGRAM_ID (.dataLen)" "$MAX_LEN"
   echo "$len"
 }
 # active | inactive. A pending activation counts as active: an extend of at
@@ -303,19 +313,15 @@ PY
   show="$(show_json)" || die "program show $PROGRAM_ID failed"
   onchain_auth="$(jq -r '.authority' <<<"$show")" || die "cannot parse program show"
   DATA_LEN="$(jq -r '.dataLen' <<<"$show")" || die "cannot parse program show"
-  need_uint "$DATA_LEN" "solana program show $PROGRAM_ID (.dataLen)"
+  need_uint "$DATA_LEN" "solana program show $PROGRAM_ID (.dataLen)" "$MAX_LEN"
   [ "$onchain_auth" = "$AUTHORITY" ] && pass "on-chain upgrade authority is $AUTHORITY" || fail "on-chain upgrade authority is $onchain_auth"
   echo "ProgramData $(jq -r '.programdataAddress' <<<"$show"), data length $DATA_LEN, last deployed in slot $(jq -r '.lastDeploySlot' <<<"$show")"
-  SIMD_0431="$(simd_0431_status)" || exit $?
-  if [ "$SIMD_0431" = active ]; then
-    echo "SIMD-0431 minimum extend ($SIMD_0431_FEATURE): ACTIVE or pending on this cluster; an extend must add at least $MIN_EXTEND_BYTES bytes"
-  else
-    echo "SIMD-0431 minimum extend ($SIMD_0431_FEATURE): inactive on this cluster; an extend may add any number of bytes"
-  fi
   EXTEND_BY=0
-  # Authenticate the code on chain before planning anything. `program dump`
-  # writes the whole ProgramData payload (data length bytes, including the
-  # zero padding an extend adds; see docs/UPGRADE_WITHDRAW_NATIVE.md).
+  # Authenticate the code on chain before anything else is read or planned,
+  # so the class and state are printed even if a later read stops the check.
+  # `program dump` writes the whole ProgramData payload (data length bytes,
+  # including the zero padding an extend adds; see
+  # docs/UPGRADE_WITHDRAW_NATIVE.md).
   local dump_class dump_len padding=""
   dump_class="$(dump_and_classify "$TMP/onchain.so" "$DATA_LEN")" || exit $?
   dump_len="$(stat -c %s "$TMP/onchain.so")" || die "stat dump"
@@ -323,15 +329,8 @@ PY
   case "$dump_class" in
     old|old+zero)
       [ "$DATA_LEN" = "$OLD_LEN" ] || padding=" followed by $((DATA_LEN - OLD_LEN)) zero bytes"
-      EXTEND_BY="$(extend_amount "$DATA_LEN" "$SIMD_0431")" || exit $?
-      need_uint "$EXTEND_BY" "extend_amount"
-      if [ "$EXTEND_BY" -gt 0 ]; then
-        STATE=extend
-        pass "on-chain code is the current build $OLD_SHA$padding; data length $DATA_LEN: extend by $EXTEND_BY bytes, then deploy"
-      else
-        STATE=extended
-        pass "data length $DATA_LEN, current build $OLD_SHA plus zero padding (already extended, not yet deployed): no extend, deploy only"
-      fi ;;
+      if [ "$DATA_LEN" -lt "$NEW_LEN" ]; then STATE=extend; else STATE=extended; fi
+      pass "on-chain code authenticated ($dump_class): the current build $OLD_SHA$padding (state: $STATE)" ;;
     new|new+zero)
       [ "$DATA_LEN" = "$NEW_LEN" ] || padding=" followed by $((DATA_LEN - NEW_LEN)) zero bytes"
       STATE=upgraded; pass "data length $DATA_LEN and the on-chain program is already $NEW_SHA$padding: nothing to do" ;;
@@ -339,6 +338,20 @@ PY
       STATE=refuse
       fail "on-chain code ($dump_class, $dump_len bytes) at data length $DATA_LEN is neither the current build $OLD_SHA nor $NEW_SHA, each followed only by zero bytes; refusing" ;;
   esac
+  SIMD_0431="$(simd_0431_status)" || exit $?
+  if [ "$SIMD_0431" = active ]; then
+    echo "SIMD-0431 minimum extend ($SIMD_0431_FEATURE): ACTIVE or pending on this cluster; an extend must add at least $MIN_EXTEND_BYTES bytes"
+  else
+    echo "SIMD-0431 minimum extend ($SIMD_0431_FEATURE): inactive on this cluster; an extend may add any number of bytes"
+  fi
+  if [ "$STATE" = extend ]; then
+    EXTEND_BY="$(extend_amount "$DATA_LEN" "$SIMD_0431")" || exit $?
+    need_uint "$EXTEND_BY" "extend_amount" "$MAX_LEN"
+    [ "$EXTEND_BY" -gt 0 ] || die "extend_amount returned 0 at data length $DATA_LEN, below $NEW_LEN"
+    echo "plan: on-chain code is the current build $OLD_SHA$padding; data length $DATA_LEN: extend by $EXTEND_BY bytes, then deploy"
+  elif [ "$STATE" = extended ]; then
+    echo "plan: data length $DATA_LEN, current build $OLD_SHA plus zero padding (already extended, not yet deployed): no extend, deploy only"
+  fi
 
   local buffers
   buffers="$(solana program show --buffers --buffer-authority "$AUTHORITY" --output json)" ||
@@ -395,6 +408,7 @@ if [ "$STATE" = extend ]; then
   echo "extending ProgramData by $EXTEND_BY bytes"
   solana program extend "$PROGRAM_ID" "$EXTEND_BY" --keypair "$DEPLOYER" || die "extend failed; rerun check"
   DATA_LEN="$(data_len_now)" || die "program show failed after extend; rerun check"
+  need_uint "$DATA_LEN" "data length after extend" "$MAX_LEN"
   [ "$DATA_LEN" -ge "$NEW_LEN" ] || die "data length after extend is $DATA_LEN, below $NEW_LEN; not deploying"
   echo "PASS: data length is now $DATA_LEN"
 fi
@@ -421,6 +435,7 @@ fi
 # The code on chain must now be the new build followed only by zero bytes
 # (ProgramData may be longer than the build), over the whole data length.
 DATA_LEN="$(data_len_now)" || die "program show failed after deploy; rerun check"
+need_uint "$DATA_LEN" "data length after deploy" "$MAX_LEN"
 AFTER="$(dump_and_classify "$TMP/onchain.so" "$DATA_LEN")" || die "program dump after deploy failed; rerun check"
 case "$AFTER" in
   new|new+zero) ;;
