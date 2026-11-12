@@ -14,6 +14,7 @@ import BN from "bn.js";
 import {
   Keypair,
   PublicKey,
+  SystemProgram,
   type Connection,
   type SimulatedTransactionResponse,
   type TransactionInstruction,
@@ -521,13 +522,31 @@ export async function readFundMetadata(
   const edition = masterEditionPda(nftMint);
   const [md, ed] = await connection.getMultipleAccountsInfo([address, edition], "confirmed");
   let stored: StoredMetadata | undefined;
-  if (md) {
-    if (!md.owner.equals(METAPLEX_PROGRAM_ID)) {
-      throw new Error(`metadata account ${address.toBase58()} is owned by ${md.owner.toBase58()}, not Token Metadata`);
-    }
-    stored = decodeMetadata(md.data);
+  if (isInitializedPda(md, address, "metadata")) {
+    stored = decodeMetadata(md!.data);
   }
-  return { address, edition, editionExists: ed !== null && ed !== undefined, stored };
+  return { address, edition, editionExists: isInitializedPda(ed, edition, "master edition"), stored };
+}
+
+/**
+ * Whether a Token Metadata PDA holds an initialized account. Anyone can send
+ * lamports to these public addresses, which leaves a System-owned account
+ * with no data; that is still uninitialized (the program checks
+ * `data_is_empty`, and Token Metadata allocates over it). Anything else that
+ * is not owned by Token Metadata is rejected as unexpected.
+ */
+export function isInitializedPda(
+  info: { owner: PublicKey; data: Uint8Array } | null | undefined,
+  address: PublicKey,
+  what: string,
+): boolean {
+  if (!info) return false;
+  if (info.data.length === 0 && info.owner.equals(SystemProgram.programId)) return false;
+  if (!info.owner.equals(METAPLEX_PROGRAM_ID)) {
+    throw new Error(`${what} account ${address.toBase58()} is owned by ${info.owner.toBase58()}, not Token Metadata`);
+  }
+  if (info.data.length === 0) return false;
+  return true;
 }
 
 export interface SetMetadataSummary {

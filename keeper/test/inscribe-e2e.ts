@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { clusterFromGenesisHash } from "../src/core/cluster.js";
-import { PlanSendError, sendPlan, type Plan, type TxOutcome } from "../src/core/owner.js";
+import { compileTx, PlanSendError, sendPlan, signatureOf, type Plan, type TxOutcome } from "../src/core/owner.js";
 import {
   decodeInscription,
   fetchInscription,
@@ -213,11 +213,36 @@ check(config1.nextInscription === plan.number + 1n, `config.next_inscription adv
   check(!!partial && !partial.sealed && partial.written === 600, `resume: #${p2.number} has 600 of 2000 bytes after tx 1`);
   const partialAsset = await connection.getAccountInfo(p2.asset, "confirmed");
   check(!!partialAsset && isFrozen(partialAsset.data), `resume: #${p2.number}'s NFT is frozen while the upload is unfinished`);
-  const rest = await prepareInscribeResume(connection, { payer: payer.publicKey, number: p2.number, content: c2, contentType: "application/json" });
-  check(rest.txs.length === p2.txs.length - 1, `resume plans the ${rest.txs.length} missing transactions`);
+  // Codex r: an append signed earlier and still in flight must block resume.
+  // Hold tx 2 (the first append) signed but unsent, as a lost-response send would leave it.
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+  const held = compileTx(payer.publicKey, p2.txs[1]!, blockhash);
+  held.sign([payer]);
+  const heldSig = signatureOf(held);
+  let blocked = false;
+  try {
+    await prepareInscribeResume(connection, {
+      payer: payer.publicKey, number: p2.number, content: c2, contentType: "application/json",
+      priorAttempts: [{ signature: heldSig, lastValidBlockHeight }],
+    });
+  } catch (err) {
+    blocked = /not resuming yet/.test(String(err));
+  }
+  check(blocked, "resume refuses while an earlier append can still land");
+  // The old append now lands late, exactly the race the guard exists for.
+  const lateSig = await connection.sendRawTransaction(held.serialize(), { skipPreflight: false });
+  await connection.confirmTransaction({ signature: lateSig, blockhash, lastValidBlockHeight }, "confirmed");
+  const afterLate = await fetchInscription(connection, p2.number);
+  check(!!afterLate && afterLate.written === 1500, `the late append landed: #${p2.number} has ${afterLate?.written} bytes`);
+  // Now settled (confirmed): resume reads fresh state and plans only what is really missing.
+  const rest = await prepareInscribeResume(connection, {
+    payer: payer.publicKey, number: p2.number, content: c2, contentType: "application/json",
+    priorAttempts: [{ signature: heldSig, lastValidBlockHeight }],
+  });
+  check(rest.txs.length === p2.txs.length - 2, `resume after the late append plans the ${rest.txs.length} remaining transaction(s), not a duplicate`);
   await send(rest, payer);
   await verify(p2, c2, payer.publicKey, "resume");
-  const again = await prepareInscribeResume(connection, { payer: payer.publicKey, number: p2.number, content: c2, contentType: "application/json" });
+  const again = await prepareInscribeResume(connection, { payer: payer.publicKey, number: p2.number, content: c2, contentType: "application/json", priorAttempts: [] });
   check(again.txs.length === 1 && again.txs[0]!.label.startsWith("thaw NFT"), "resume of a sealed inscription plans only the (no-op) thaw");
   await send(again, payer);
   await verify(p2, c2, payer.publicKey, "resume, thaw again");

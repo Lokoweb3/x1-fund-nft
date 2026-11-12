@@ -17,6 +17,54 @@ pub const METAPLEX_PROGRAM_ID: Pubkey = pubkey!("metaqbxxUerdq28cj1RbAWkYQm3ybzj
 
 /// Token Metadata limits, in bytes (`MAX_NAME_LENGTH`, `MAX_SYMBOL_LENGTH`,
 /// `MAX_URI_LENGTH`).
+/// Most `attach_metadata` may debit the holder, in lamports (0.03 XNT).
+/// Measured honest cost on the cloned X1 Token Metadata program on
+/// 2026-11-12: 16,145,680 lamports (metadata 15,115,600 incl. the 0.01 XNT
+/// creation fee, plus edition 1,030,080). The holder signer and the System
+/// Program are forwarded to the upgradeable Token Metadata program, so this
+/// cap bounds what a malicious upgrade could take from the holder's wallet.
+pub const MAX_ATTACH_DEBIT_LAMPORTS: u64 = 30_000_000;
+
+/// What `attach_metadata` observes about the holder (the fee payer it hands
+/// to Token Metadata) before and after the two CPIs.
+#[derive(Clone, Copy, Debug)]
+pub struct PayerState {
+    pub owner: Pubkey,
+    pub data_len: usize,
+    pub lamports: u64,
+}
+
+/// The holder must be an ordinary System-owned wallet with no data, before
+/// and after Token Metadata runs, and must not have lost more than the cap.
+/// Checking only lamports is not enough: Token Metadata receives the holder
+/// as a writable signer plus the System Program, so a malicious upgrade could
+/// `Assign` the holder to itself (no debit needed) and drain it later, or
+/// `Allocate` data on it.
+pub fn payer_preserved(before: PayerState, after: PayerState) -> core::result::Result<(), PayerChange> {
+    let system = anchor_lang::system_program::ID;
+    if before.owner != system || before.data_len != 0 {
+        return Err(PayerChange::NotAWallet);
+    }
+    if after.owner != system {
+        return Err(PayerChange::Reassigned);
+    }
+    if after.data_len != 0 {
+        return Err(PayerChange::Allocated);
+    }
+    if before.lamports.saturating_sub(after.lamports) > MAX_ATTACH_DEBIT_LAMPORTS {
+        return Err(PayerChange::OverDebited);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayerChange {
+    NotAWallet,
+    Reassigned,
+    Allocated,
+    OverDebited,
+}
+
 pub const MAX_NAME_LEN: usize = 32;
 pub const MAX_SYMBOL_LEN: usize = 10;
 pub const MAX_URI_LEN: usize = 200;
@@ -80,6 +128,56 @@ pub fn trim_nul(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::MAX_ATTACH_DEBIT_LAMPORTS;
+    use super::{payer_preserved, PayerChange, PayerState};
+    use anchor_lang::prelude::Pubkey;
+
+    fn wallet(lamports: u64) -> PayerState {
+        PayerState { owner: anchor_lang::system_program::ID, data_len: 0, lamports }
+    }
+
+    #[test]
+    fn honest_attach_leaves_an_ordinary_wallet() {
+        assert_eq!(payer_preserved(wallet(1_000_000_000), wallet(1_000_000_000 - 16_145_680)), Ok(()));
+    }
+
+    #[test]
+    fn a_reassigned_holder_is_refused_even_within_the_cap() {
+        // Codex r2: Assign costs no lamports, so only the owner check catches it.
+        let mut after = wallet(1_000_000_000 - 16_145_680);
+        after.owner = super::METAPLEX_PROGRAM_ID;
+        assert_eq!(payer_preserved(wallet(1_000_000_000), after), Err(PayerChange::Reassigned));
+    }
+
+    #[test]
+    fn allocated_data_or_over_debit_or_a_non_wallet_payer_is_refused() {
+        let mut allocated = wallet(999_000_000);
+        allocated.data_len = 1;
+        assert_eq!(payer_preserved(wallet(1_000_000_000), allocated), Err(PayerChange::Allocated));
+        assert_eq!(
+            payer_preserved(wallet(1_000_000_000), wallet(1_000_000_000 - MAX_ATTACH_DEBIT_LAMPORTS - 1)),
+            Err(PayerChange::OverDebited)
+        );
+        assert_eq!(
+            payer_preserved(wallet(1_000_000_000), wallet(1_000_000_000 - MAX_ATTACH_DEBIT_LAMPORTS)),
+            Ok(())
+        );
+        let mut program_owned = wallet(1_000_000_000);
+        program_owned.owner = Pubkey::new_from_array([4u8; 32]);
+        assert_eq!(payer_preserved(program_owned, wallet(1_000_000_000)), Err(PayerChange::NotAWallet));
+        let mut with_data = wallet(1_000_000_000);
+        with_data.data_len = 8;
+        assert_eq!(payer_preserved(with_data, wallet(1_000_000_000)), Err(PayerChange::NotAWallet));
+    }
+
+    #[test]
+    fn attach_cost_cap_covers_the_honest_cost_and_little_more() {
+        // Measured on the cloned X1 Token Metadata program (2026-11-12).
+        let honest: u64 = 15_115_600 + 1_030_080;
+        assert!(MAX_ATTACH_DEBIT_LAMPORTS >= honest * 3 / 2, "headroom for rent changes");
+        assert!(MAX_ATTACH_DEBIT_LAMPORTS <= 50_000_000, "cap stays small (0.05 XNT)");
+    }
+
     use super::*;
 
     fn code(result: Result<()>) -> u32 {
