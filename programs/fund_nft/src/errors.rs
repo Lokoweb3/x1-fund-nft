@@ -18,11 +18,11 @@ pub enum FundError {
     DuplicatePool,
     #[msg("A target weight must be greater than zero")]
     ZeroBps,
-    #[msg("The TWAP window must be greater than zero")]
+    #[msg("The TWAP window must be between 900 and 86400 seconds")]
     BadWindow,
-    #[msg("The DCA interval must be greater than zero")]
+    #[msg("The DCA interval must be at least 60 seconds")]
     BadInterval,
-    #[msg("max_dev_bps cannot exceed 10000")]
+    #[msg("max_dev_bps cannot exceed 500")]
     BadDeviation,
     #[msg("per_run_quote must be greater than zero")]
     ZeroPerRun,
@@ -76,4 +76,6 @@ pub enum FundError {
     VaultDelegate,
     #[msg("A fund vault has a close authority")]
     VaultCloseAuthority,
+    #[msg("The TWAP minimum output rounded to zero")]
+    ZeroMinOut,
 }

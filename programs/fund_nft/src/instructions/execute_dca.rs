@@ -220,6 +220,8 @@ pub fn handle_execute_dca(ctx: Context<ExecuteDca>, target_index: u8) -> Result<
         .map_err(|_| error!(FundError::TwapRejected))?
         .min_out
     };
+    // A zero minimum would let the pool return nothing.
+    require!(min_out > 0, FundError::ZeroMinOut);
 
     let bump_seed = [bump];
     let signer: &[&[u8]] = &[FUND_SEED, nft_mint.as_ref(), &bump_seed];

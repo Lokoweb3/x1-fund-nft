@@ -161,9 +161,9 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
     let creator_nft = ata(&payer.pubkey(), &nft_mint.pubkey(), &classic);
     let params = CreateFundParams {
         per_run_quote: 500_000,
-        interval_secs: 1,
+        interval_secs: 60,
         twap_window_secs: window,
-        max_dev_bps: 1_000,
+        max_dev_bps: 500,
         targets: vec![
             TargetParams {
                 mint: usdc,
@@ -468,7 +468,7 @@ fn choose_window(ring: &[u8], index: u16) -> Option<u32> {
                 basis_points: 500,
                 maximum_fee: u64::MAX,
             },
-            max_dev_bps: 1_000,
+            max_dev_bps: 500,
         });
         if quote.is_ok() {
             return Some(window);

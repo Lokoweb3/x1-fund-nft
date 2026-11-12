@@ -7,6 +7,13 @@ pub const BPS_SUM: u16 = 10_000;
 /// Constant crank tip. There is no admin and no instruction that can change it.
 pub const TIP_BPS: u64 = 10;
 pub const FUND_SEED: &[u8] = b"fund";
+/// Largest deviation a fund may allow below the TWAP output (5%).
+pub const MAX_DEV_BPS: u16 = 500;
+/// TWAP window bounds, in seconds (15 minutes to 24 hours).
+pub const MIN_TWAP_WINDOW_SECS: u32 = 900;
+pub const MAX_TWAP_WINDOW_SECS: u32 = 86_400;
+/// Shortest DCA interval, in seconds.
+pub const MIN_INTERVAL_SECS: i64 = 60;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace, Debug)]
 pub struct Target {
@@ -49,9 +56,15 @@ pub struct CreateFundParams {
 
 pub fn validate_create(quote_mint: &Pubkey, params: &CreateFundParams) -> Result<()> {
     require!(params.per_run_quote > 0, FundError::ZeroPerRun);
-    require!(params.interval_secs > 0, FundError::BadInterval);
-    require!(params.twap_window_secs > 0, FundError::BadWindow);
-    require!(params.max_dev_bps <= BPS_SUM, FundError::BadDeviation);
+    require!(
+        params.interval_secs >= MIN_INTERVAL_SECS,
+        FundError::BadInterval
+    );
+    require!(
+        (MIN_TWAP_WINDOW_SECS..=MAX_TWAP_WINDOW_SECS).contains(&params.twap_window_secs),
+        FundError::BadWindow
+    );
+    require!(params.max_dev_bps <= MAX_DEV_BPS, FundError::BadDeviation);
 
     let n = params.targets.len();
     require!(n > 0, FundError::EmptyTargets);
@@ -124,6 +137,81 @@ mod tests {
             },
         ]);
         assert!(validate_create(&quote, &ok).is_ok());
+    }
+
+    fn one_target(quote: Pubkey) -> CreateFundParams {
+        params(vec![
+            TargetParams {
+                mint: quote,
+                pool: Pubkey::default(),
+                bps: 2_000,
+            },
+            TargetParams {
+                mint: mint(2),
+                pool: pool(2),
+                bps: 8_000,
+            },
+        ])
+    }
+
+    fn code(result: Result<()>) -> u32 {
+        match result.unwrap_err() {
+            Error::AnchorError(err) => err.error_code_number,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deviation_is_capped_at_500_bps() {
+        let quote = quote();
+        let mut p = one_target(quote);
+        p.max_dev_bps = 500;
+        assert!(validate_create(&quote, &p).is_ok());
+        p.max_dev_bps = 0;
+        assert!(validate_create(&quote, &p).is_ok());
+        p.max_dev_bps = 501;
+        assert_eq!(
+            code(validate_create(&quote, &p)),
+            u32::from(FundError::BadDeviation)
+        );
+        p.max_dev_bps = 10_000;
+        assert!(validate_create(&quote, &p).is_err());
+    }
+
+    #[test]
+    fn twap_window_must_be_15_minutes_to_24_hours() {
+        let quote = quote();
+        let mut p = one_target(quote);
+        for ok in [900u32, 3_600, 86_400] {
+            p.twap_window_secs = ok;
+            assert!(validate_create(&quote, &p).is_ok(), "{ok}");
+        }
+        for bad in [0u32, 1, 899, 86_401, u32::MAX] {
+            p.twap_window_secs = bad;
+            assert_eq!(
+                code(validate_create(&quote, &p)),
+                u32::from(FundError::BadWindow),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn interval_must_be_at_least_60_seconds() {
+        let quote = quote();
+        let mut p = one_target(quote);
+        for ok in [60i64, 3_600, i64::MAX] {
+            p.interval_secs = ok;
+            assert!(validate_create(&quote, &p).is_ok(), "{ok}");
+        }
+        for bad in [i64::MIN, -1, 0, 1, 59] {
+            p.interval_secs = bad;
+            assert_eq!(
+                code(validate_create(&quote, &p)),
+                u32::from(FundError::BadInterval),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
