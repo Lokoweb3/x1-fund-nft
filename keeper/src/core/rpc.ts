@@ -462,6 +462,7 @@ export async function prepareWithdraw(
 // ---- withdraw-native ----
 
 export interface NativeBalance {
+  exact: true;
   lamports: bigint;
   dataLength: number;
   /** Rent-exempt minimum for the Fund account's current data length. */
@@ -470,26 +471,49 @@ export interface NativeBalance {
   available: bigint;
 }
 
+/**
+ * The RPC's lamport count (or rent minimum) is above 2^53 - 1, so the JS
+ * number web3.js parsed may be rounded. Nothing exact can be computed from
+ * it; only an explicit raw --amount can be used, and the program enforces
+ * the rent floor itself.
+ */
+export interface InexactNativeBalance {
+  exact: false;
+  /** The parsed (possibly rounded) number, for display only. */
+  approxLamports: number;
+  dataLength: number;
+}
+
+export const INEXACT_BALANCE_HINT = "is too large to read exactly; use --amount <lamports>";
+
 /** A lamport count from the RPC as a bigint; refuses a number that may have been rounded. */
 export function exactLamports(value: number, what: string): bigint {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${what} (${value}) is too large to read exactly; use --amount <lamports>`);
+    throw new Error(`${what} (${value}) ${INEXACT_BALANCE_HINT}`);
   }
   return BigInt(value);
 }
 
-/** Native XNT on the Fund account and how much of it the holder can withdraw. */
-export async function readNativeBalance(connection: Connection, fundKey: PublicKey): Promise<NativeBalance> {
+/**
+ * Native XNT on the Fund account and how much of it the holder can withdraw.
+ * web3.js parses lamports as a JS number; above 2^53 - 1 it may already be
+ * rounded, so then this returns `exact: false` instead of a computed amount.
+ */
+export async function readNativeBalance(
+  connection: Connection,
+  fundKey: PublicKey,
+): Promise<NativeBalance | InexactNativeBalance> {
   const info = await connection.getAccountInfo(fundKey, "confirmed");
   if (!info) throw new Error(`fund ${fundKey.toBase58()} does not exist`);
-  // web3.js parses lamports as a JS number. Above 2^53 - 1 it may already be
-  // rounded, and `all` must never compute from a rounded balance.
-  const lamports = exactLamports(info.lamports, `fund ${fundKey.toBase58()} balance`);
-  const rentMinimum = exactLamports(
-    await connection.getMinimumBalanceForRentExemption(info.data.length, "confirmed"),
-    "rent-exempt minimum",
-  );
-  return { lamports, dataLength: info.data.length, rentMinimum, available: nativeAvailable(lamports, rentMinimum) };
+  const dataLength = info.data.length;
+  const rent = await connection.getMinimumBalanceForRentExemption(dataLength, "confirmed");
+  const safe = (n: number) => Number.isSafeInteger(n) && n >= 0;
+  if (!safe(info.lamports) || !safe(rent)) {
+    return { exact: false, approxLamports: info.lamports, dataLength };
+  }
+  const lamports = BigInt(info.lamports);
+  const rentMinimum = BigInt(rent);
+  return { exact: true, lamports, dataLength, rentMinimum, available: nativeAvailable(lamports, rentMinimum) };
 }
 
 export interface WithdrawNativeSummary {
@@ -497,7 +521,8 @@ export interface WithdrawNativeSummary {
   fundAccount: FundAccount;
   holder: PublicKey;
   nftAccount: NftAccount | undefined;
-  balance: NativeBalance;
+  /** `exact: false`: the amount was not checked client-side; the program enforces the rent floor. */
+  balance: NativeBalance | InexactNativeBalance;
   amount: bigint;
   /** False when the payer does not hold the NFT; the program will reject it. */
   payerHoldsNft: boolean;
@@ -511,18 +536,28 @@ export async function prepareWithdrawNative(
   if (requested === 0n) throw new Error("--amount must be greater than zero");
   const fund = await loadFund(ctx.connection, ctx.program, fundKey);
   const balance = await readNativeBalance(ctx.connection, fundKey);
-  const amount = requested === "all" ? balance.available : requested;
-  if (amount === 0n) {
-    throw new Error(
-      `fund ${fundKey.toBase58()} has no native XNT above its rent-exempt minimum ` +
-        `(${formatUi(balance.lamports, 9)} held, ${formatUi(balance.rentMinimum, 9)} reserved for rent)`,
-    );
-  }
-  if (amount > balance.available) {
-    throw new Error(
-      `withdraw-native ${formatUi(amount, 9)} exceeds the ${formatUi(balance.available, 9)} XNT available ` +
-        `(fund holds ${formatUi(balance.lamports, 9)}, ${formatUi(balance.rentMinimum, 9)} stays for rent)`,
-    );
+  let amount: bigint;
+  if (!balance.exact) {
+    // Without an exact balance, `all` cannot be computed. An explicit amount
+    // goes to the program unchecked here; it refuses anything below rent.
+    if (requested === "all") {
+      throw new Error(`fund ${fundKey.toBase58()} balance (${balance.approxLamports}) ${INEXACT_BALANCE_HINT}`);
+    }
+    amount = requested;
+  } else {
+    amount = requested === "all" ? balance.available : requested;
+    if (amount === 0n) {
+      throw new Error(
+        `fund ${fundKey.toBase58()} has no native XNT above its rent-exempt minimum ` +
+          `(${formatUi(balance.lamports, 9)} held, ${formatUi(balance.rentMinimum, 9)} reserved for rent)`,
+      );
+    }
+    if (amount > balance.available) {
+      throw new Error(
+        `withdraw-native ${formatUi(amount, 9)} exceeds the ${formatUi(balance.available, 9)} XNT available ` +
+          `(fund holds ${formatUi(balance.lamports, 9)}, ${formatUi(balance.rentMinimum, 9)} stays for rent)`,
+      );
+    }
   }
   const nftAccount = await findNftAccount(ctx.connection, fund.nftMint);
   const ix = await buildWithdrawNativeIx(

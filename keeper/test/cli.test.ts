@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 import { Connection, Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { X1_MAINNET_GENESIS_HASH, X1_TESTNET_GENESIS_HASH } from "../src/cluster.js";
-import { createProgram, IDL } from "../src/fund.js";
+import { createProgram, FUND_ACCOUNT, IDL } from "../src/fund.js";
 import {
   assertPlanFits,
   buildCreateFundIx,
@@ -40,10 +40,10 @@ import {
   TOKEN_PROGRAM_ID,
   type PoolAccounts,
 } from "../src/pool.js";
-import { exactLamports, readNativeBalance } from "../src/core/rpc.js";
+import { exactLamports, prepareWithdrawNative, readNativeBalance } from "../src/core/rpc.js";
 
 const require = createRequire(import.meta.url);
-const { AnchorProvider, Wallet } = require("@anchor-lang/core") as typeof import("@anchor-lang/core");
+const { AnchorProvider, BN, Wallet } = require("@anchor-lang/core") as typeof import("@anchor-lang/core");
 
 const QUOTE = "B69chRzqzDCmdB5WYB8NRu5Yv5ZA95ABiZcdzCgGm9Tq";
 const TEST_MINT = "C9P839X3i1ijPyCvHEg3HpbEVjBLHJdxGXjez3yVn3Rz";
@@ -597,7 +597,7 @@ test("withdraw_native builder names the program's accounts in IDL order", async 
   assert.equal(Math.max(...errors.map((e) => e.code)), 6054);
 });
 
-test("readNativeBalance refuses lamport counts a JS number cannot hold exactly", async () => {
+test("readNativeBalance marks lamport counts a JS number cannot hold exactly as inexact", async () => {
   const fund = Keypair.generate().publicKey;
   const fake = (lamports: number, rent: number) =>
     ({
@@ -606,15 +606,73 @@ test("readNativeBalance refuses lamport counts a JS number cannot hold exactly",
     }) as unknown as Connection;
   const max = Number.MAX_SAFE_INTEGER; // 2^53 - 1
   const ok = await readNativeBalance(fake(max, 6_145_680), fund);
+  assert.ok(ok.exact);
+  if (!ok.exact) return;
   assert.equal(ok.lamports, 9_007_199_254_740_991n);
   assert.equal(ok.rentMinimum, 6_145_680n);
   assert.equal(ok.available, 9_007_199_254_740_991n - 6_145_680n);
   assert.equal(ok.dataLength, 755);
   // 2^53 + 1 is not representable; the parsed number is already rounded.
-  await assert.rejects(readNativeBalance(fake(2 ** 53 + 1, 6_145_680), fund), /too large to read exactly; use --amount <lamports>/);
-  await assert.rejects(readNativeBalance(fake(2 ** 53, 6_145_680), fund), /too large to read exactly/);
-  await assert.rejects(readNativeBalance(fake(10_000_000, 2 ** 53 + 1), fund), /rent-exempt minimum .* too large/);
+  for (const [lamports, rent] of [[2 ** 53 + 1, 6_145_680], [2 ** 53, 6_145_680], [10_000_000, 2 ** 53 + 1]] as const) {
+    const b = await readNativeBalance(fake(lamports, rent), fund);
+    assert.equal(b.exact, false, `${lamports}/${rent}`);
+    assert.equal(b.dataLength, 755);
+  }
   assert.equal(exactLamports(0, "x"), 0n);
+  assert.throws(() => exactLamports(2 ** 53 + 1, "x"), /too large to read exactly; use --amount <lamports>/);
   assert.throws(() => exactLamports(-1, "x"), /too large to read exactly/);
-  assert.throws(() => exactLamports(1.5, "x"), /too large to read exactly/);
+});
+
+test("prepareWithdrawNative: exact balances are checked; an inexact one allows only an explicit amount", async () => {
+  const provider = new AnchorProvider(new Connection("http://127.0.0.1:1"), new Wallet(Keypair.generate()), {});
+  const program = createProgram(provider);
+  const holder = Keypair.generate().publicKey;
+  const nftMint = Keypair.generate().publicKey;
+  const nftAccount = Keypair.generate().publicKey;
+  const fund = fundPda(nftMint);
+  const fundData = await program.coder.accounts.encode(FUND_ACCOUNT, {
+    nftMint,
+    quoteMint: new PublicKey(QUOTE),
+    bump: 254,
+    perRunQuote: new BN(100_000),
+    intervalSecs: new BN(3_600),
+    twapWindowSecs: 3_600,
+    maxDevBps: 300,
+    targets: [{ mint: new PublicKey(QUOTE), pool: PublicKey.default, bps: 10_000, budget: new BN(0), lastRun: new BN(0) }],
+  });
+  const nftData = Buffer.alloc(165);
+  nftMint.toBuffer().copy(nftData, 0);
+  holder.toBuffer().copy(nftData, 32);
+  const RENT = 6_145_680;
+  const connectionWith = (lamports: number) =>
+    ({
+      getAccountInfo: async (key: PublicKey) => {
+        if (key.equals(fund)) return { lamports, data: fundData, owner: PROGRAM_ID, executable: false };
+        if (key.equals(nftAccount)) return { lamports: 2_039_280, data: nftData, owner: TOKEN_PROGRAM_ID, executable: false };
+        return null;
+      },
+      getMinimumBalanceForRentExemption: async () => RENT,
+      getTokenLargestAccounts: async () => ({ value: [{ address: nftAccount, amount: "1" }] }),
+    }) as unknown as Connection;
+  const ctx = (lamports: number) => ({ connection: connectionWith(lamports), program, payer: holder, budget: [] });
+  const amountOf = (ix: { data: Buffer }) => ix.data.readBigUInt64LE(8);
+
+  // Exact: all = lamports - rent; above available and nothing available are refused.
+  const exact = await prepareWithdrawNative(ctx(RENT + 500_000_000), fund, "all");
+  assert.equal(exact.summary.amount, 500_000_000n);
+  assert.ok(exact.summary.balance.exact);
+  assert.ok(exact.summary.payerHoldsNft);
+  assert.equal(amountOf(exact.plan.txs[0]!.instructions.at(-1)! as { data: Buffer }), 500_000_000n);
+  await assert.rejects(prepareWithdrawNative(ctx(RENT + 500_000_000), fund, 500_000_001n), /exceeds the 0.5 XNT available/);
+  await assert.rejects(prepareWithdrawNative(ctx(RENT), fund, "all"), /no native XNT above its rent-exempt minimum/);
+
+  // Inexact (2^53 + 1 lamports): `all` is refused, an explicit amount is built
+  // unchecked and left to the program's rent floor.
+  const big = 2 ** 53 + 1;
+  await assert.rejects(prepareWithdrawNative(ctx(big), fund, "all"), /too large to read exactly; use --amount <lamports>/);
+  const explicit = await prepareWithdrawNative(ctx(big), fund, 9_007_199_254_740_993n);
+  assert.equal(explicit.summary.balance.exact, false);
+  assert.equal(explicit.summary.amount, 9_007_199_254_740_993n);
+  assert.equal(amountOf(explicit.plan.txs[0]!.instructions.at(-1)! as { data: Buffer }), 9_007_199_254_740_993n);
+  await assert.rejects(prepareWithdrawNative(ctx(big), fund, 0n), /greater than zero/);
 });

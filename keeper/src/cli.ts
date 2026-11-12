@@ -294,9 +294,14 @@ async function planWithdrawNative(ctx: Ctx, parsed: Extract<ParsedCli, { command
   console.log(`  fund             ${s.fund.toBase58()}`);
   console.log(`  holder           ${s.holder.toBase58()} (receives the XNT)`);
   console.log(`  NFT account      ${s.nftAccount ? `${s.nftAccount.address.toBase58()} (owner ${s.nftAccount.owner.toBase58()})` : "not found"}`);
-  console.log(`  fund XNT         ${formatUi(b.lamports, 9)} (raw ${b.lamports})`);
-  console.log(`  rent reserve     ${formatUi(b.rentMinimum, 9)} (rent-exempt minimum for ${b.dataLength} bytes; stays)`);
-  console.log(`  available        ${formatUi(b.available, 9)} (raw ${b.available})`);
+  if (b.exact) {
+    console.log(`  fund XNT         ${formatUi(b.lamports, 9)} (raw ${b.lamports})`);
+    console.log(`  rent reserve     ${formatUi(b.rentMinimum, 9)} (rent-exempt minimum for ${b.dataLength} bytes; stays)`);
+    console.log(`  available        ${formatUi(b.available, 9)} (raw ${b.available})`);
+  } else {
+    console.log(`  fund XNT         balance too large to display exactly (~${b.approxLamports} lamports)`);
+    console.log("  available        not checked here; the program refuses anything that would leave the fund below rent");
+  }
   console.log(`  amount           ${formatUi(s.amount, 9)} XNT (raw ${s.amount} lamports)`);
   console.log("  vaults, budgets and targets are not touched");
   if (!s.payerHoldsNft) {
@@ -378,11 +383,18 @@ async function show(connection: Connection, program: ProgramT, fundKey: PublicKe
     console.log(`  ${vault.mint.address.toBase58()} ${vault.vault.toBase58()} ${bal}`);
   }
   const native = await readNativeBalance(connection, fundKey);
-  console.log(
-    `native XNT available to withdraw: ${formatUi(native.available, 9)} ` +
-      `(raw ${native.available}; fund holds ${formatUi(native.lamports, 9)}, ` +
-      `${formatUi(native.rentMinimum, 9)} stays for rent)`,
-  );
+  if (native.exact) {
+    console.log(
+      `native XNT available to withdraw: ${formatUi(native.available, 9)} ` +
+        `(raw ${native.available}; fund holds ${formatUi(native.lamports, 9)}, ` +
+        `${formatUi(native.rentMinimum, 9)} stays for rent)`,
+    );
+  } else {
+    console.log(
+      `native XNT available to withdraw: balance too large to display exactly (~${native.approxLamports} lamports); ` +
+        "withdraw-native needs --amount <lamports>",
+    );
+  }
 }
 
 /**
