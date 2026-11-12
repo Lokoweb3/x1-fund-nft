@@ -95,3 +95,18 @@ Safety follows the keeper and reuses `keeper/src/cluster.ts`:
 `npm test` also covers the CLI offline: argument parsing, the bounds, the remaining-account order (cash skipped), the fund PDA, the pool check, the send gate, the create-fund transaction sizes, the partial-failure message, and the transfer-fee math.
 
 `bash test/e2e-local.sh` (or `npm run e2e`) runs the CLI against a loopback `solana-test-validator` on ports 18989–19030. It needs `target/deploy/fund_nft.so`, the Agave CLI, `jq`, and read access to `https://rpc.mainnet.x1.xyz` for clones. It uses the same X1 feature mode as the Rust test (set `E2E_FEATURES=agave` for Agave defaults) and clones XDEX, the USDC.X/TEST pool and X1's token programs. The quote mint is the cloned USDC.X with its mint authority overwritten to a throwaway payer, so the fund can pin TEST to the real pool. Keys, the Solana CLI config and the ledger go in a temp dir under `E2E_SCRATCH` (absolute; default `$TMPDIR` or `/tmp`), deleted on exit. Every Agave tool runs through a wrapper that requires `-C <work dir config>` and sets `HOME` to an empty dir inside the work dir, and the validator gets `--mint <throwaway payer>`, so nothing reads `~/.config/solana` or a wallet outside the work dir. Every step uses `--send --cluster localnet`: create-fund, ensure-vaults twice (nothing to do), a bare `create_fund` without vaults (`test/e2e-bare-fund.ts`, loopback only) repaired by ensure-vaults and then rerun, deposit, show, keeper `--dry-run`, withdraw quote, a non-holder withdraw that the program rejects with `BadNft` during the CLI's pre-send simulation, and withdraw all.
+
+## Owner web app
+
+`app/` is a local web app that does the same work as the owner CLI from a browser wallet (Backpack or any other Wallet Standard wallet). It lists the funds your wallet's NFTs control, shows a fund's targets, budgets and vaults, and creates funds, deposits, withdraws and runs ensure-vaults. It also shows a read-only keeper status. Run it with `cd app && npm install && npm run dev` and open http://127.0.0.1:5173. The dev server binds to loopback only.
+
+The app does not have its own transaction builders. The CLI's bounds, builders, planners, size checks, fee math and `sendPlan` live in browser-safe `keeper/src/core/`, and both the CLI and the app import them. The app keeps the CLI's safety model:
+
+- the genesis-hash cluster banner, with mainnet in red
+- an "I understand this is X1 mainnet" tick for each session
+- no sends to an unknown chain
+- a check that the program is deployed
+- simulation of every transaction and a review before **Sign & send**
+- the same honest partial-failure report
+
+`scripts/local-validator.sh` starts a loopback validator with the program and the cloned USDC.X/TEST pool. `--fund-wallet <pubkey>` funds a browser wallet on that local chain. See [app/README.md](app/README.md).

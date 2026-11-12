@@ -79,6 +79,8 @@ After deploying, back up `keys/fund_nft-mainnet.json` and the deployer keypair o
 
 Run this after the deploy has been verified. Use the owner's own wallet and small amounts. The fund below is USDC.X with a 20% cash slice and 80% TEST through the USDC.X/TEST pool; swap in the real basket. Each step is simulated first. Read the summary and the simulation logs before adding the send flags.
 
+Alternative to the CLI: the local web app (`cd app && npm install && npm run dev`, see `app/README.md`) does steps 1–4 and 6 with a browser wallet, using the same builders and checks. It shows the red mainnet banner and needs the "I understand this is X1 mainnet and uses real funds" tick. It simulates every transaction and shows a review before **Sign & send**. Step 5 stays in the keeper: the app only shows the `--dry-run` command.
+
 ```sh
 cd ~/X1_PROJECTS/X1_FundNFT/keeper
 npm ci
