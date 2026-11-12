@@ -111,6 +111,8 @@ export interface NativeHolding {
   amount: bigint | undefined;
   /** True when the balance is above 2^53 - 1 lamports and could not be read exactly: never valued. */
   inexact?: boolean;
+  /** True when the balance read failed: never valued. */
+  unreadable?: boolean;
   /** Raw quote units: the amount itself when the quote is WXNT (1:1), else undefined (not priced). */
   value: bigint | undefined;
 }
@@ -121,9 +123,11 @@ export interface NativeHolding {
  * leaves it unpriced and the total marked incomplete. Nothing when zero or
  * unknown (not loaded). "inexact" (balance above 2^53 - 1 lamports) is never
  * computed from: it adds an unvalued row and marks the total incomplete.
+ * "unreadable" (the read failed) does the same.
  */
-export function withNative(v: Valuation, quote: PublicKey, available: bigint | "inexact" | undefined): Valuation {
+export function withNative(v: Valuation, quote: PublicKey, available: bigint | "inexact" | "unreadable" | undefined): Valuation {
   if (available === "inexact") return { ...v, complete: false, native: { amount: undefined, inexact: true, value: undefined } };
+  if (available === "unreadable") return { ...v, complete: false, native: { amount: undefined, unreadable: true, value: undefined } };
   if (available === undefined || available <= 0n) return v;
   const value = quote.toBase58() === WXNT_MINT ? available : undefined;
   return {

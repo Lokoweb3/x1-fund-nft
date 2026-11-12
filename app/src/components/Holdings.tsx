@@ -114,8 +114,12 @@ export function HoldingsCard({ state, view, labels }: { state: ValuationState; v
                       XNT (native, e.g. reflections)
                     </span>
                   </th>
-                  <td className="num" title={v.native.amount === undefined ? "balance too large to value exactly" : exactUi(v.native.amount, 9)}>
-                    {v.native.amount === undefined ? <span className="muted">too large to read exactly</span> : formatAmount(v.native.amount, 9)}
+                  <td className="num" title={v.native.amount === undefined ? (v.native.unreadable ? "balance could not be read" : "balance too large to value exactly") : exactUi(v.native.amount, 9)}>
+                    {v.native.amount === undefined ? (
+                      <span className="muted">{v.native.unreadable ? "could not be read" : "too large to read exactly"}</span>
+                    ) : (
+                      formatAmount(v.native.amount, 9)
+                    )}
                   </td>
                   <td className="num" title={v.native.value === undefined ? "not priced in " + q : `${exactUi(v.native.value, qd)} ${q} (1 XNT = 1 WXNT)`}>
                     {v.native.value === undefined ? <span className="muted">unknown</span> : formatValue(v.native.value, qd)}
@@ -148,7 +152,9 @@ export function HoldingsCard({ state, view, labels }: { state: ValuationState; v
       })}
       {v?.native && (
         <p className="small muted" data-testid="holding-native-note">
-          {v.native.inexact
+          {v.native.unreadable
+            ? "XNT (native): could not be read, so it is not in the total."
+            : v.native.inexact
             ? "XNT (native): balance too large to value exactly, so it is not in the total."
             : v.native.value === undefined
             ? `Native XNT is not priced in ${q}, so it is not in the total.`

@@ -41,8 +41,13 @@ export function exactAvailable(b: AnyNativeBalance | undefined): bigint | undefi
   return b?.exact ? b.available : undefined;
 }
 
-/** What the valuation gets (value.ts withNative): exact available lamports, "inexact", or undefined when not loaded. */
-export function nativeForValuation(b: AnyNativeBalance | undefined): bigint | "inexact" | undefined {
+/**
+ * What the valuation gets (value.ts withNative): exact available lamports,
+ * "inexact", "unreadable" when the read failed, or undefined when not
+ * loaded yet (neutral).
+ */
+export function nativeForValuation(b: AnyNativeBalance | undefined, readError?: string): bigint | "inexact" | "unreadable" | undefined {
+  if (readError) return "unreadable";
   if (!b) return undefined;
   return b.exact ? b.available : "inexact";
 }

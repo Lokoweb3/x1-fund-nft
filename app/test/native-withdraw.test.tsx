@@ -303,3 +303,24 @@ test("inexact native in a WXNT fund: total marked incomplete, unknown marker, na
   );
   assert.match(card, /≈ 1\.00 WXNT \+ unknown/);
 });
+
+test("a failed native read marks the total incomplete with a note; not loaded yet stays neutral", () => {
+  const wxnt: MintMeta = { address: new PublicKey(WXNT_MINT), decimals: 9, tokenProgram: TOKEN_PROGRAM_ID, transferFee: undefined };
+  const vaults = [{ mint: wxnt, vault: k(), balance: 1_000_000_000n }];
+  const base = valueHoldings({ quote: wxnt, vaults, pools: {} });
+  assert.equal(nativeForValuation(undefined, "fetch failed"), "unreadable");
+  assert.equal(nativeForValuation(balance, "fetch failed"), "unreadable");
+  // Not loaded yet: neutral, the valuation is unchanged.
+  assert.equal(withNative(base, wxnt.address, nativeForValuation(undefined)), base);
+  const v = withNative(base, wxnt.address, nativeForValuation(undefined, "fetch failed"));
+  assert.equal(v.complete, false);
+  assert.equal(v.total, 1_000_000_000n);
+  assert.deepEqual(v.native, { amount: undefined, unreadable: true, value: undefined });
+  const view = { quote: wxnt, vaults, account: { quoteMint: wxnt.address } } as unknown as FundView;
+  const labels = { [WXNT_MINT]: { symbol: "WXNT" } } as never;
+  const html = renderToString(<HoldingsCard state={{ status: "ok", valuation: v }} view={view} labels={labels} />);
+  assert.match(html, /<span class="stat-unit"> \+ unknown<\/span>/);
+  assert.match(html, /data-testid="holding-native"/);
+  assert.match(html, />could not be read</);
+  assert.match(html, /data-testid="holding-native-note">XNT \(native\): could not be read, so it is not in the total\./);
+});
