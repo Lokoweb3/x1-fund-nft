@@ -130,6 +130,13 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   await page.getByTestId("close-review").click();
 
   // Deposit 1 USDC.X and check the budgets: 0.2 cash, 0.8 TEST.
+  // The holder's card shows all three actions; the forms open on the card.
+  await expect(page.getByTestId("nft-escrow")).toHaveCount(0);
+  for (const a of ["deposit", "withdraw", "native"]) await expect(page.getByTestId(`card-action-${a}`)).toBeEnabled();
+  await expect(page.getByTestId("deposit-review")).toHaveCount(0);
+  await page.getByTestId("card-action-deposit").click();
+  await expect(page.getByTestId("card-action-panel")).toHaveAttribute("data-action", "deposit");
+  await expect(page.getByTestId("deposit-note")).toHaveText("Deposits become part of the fund and belong to whoever holds the NFT.");
   await page.getByLabel("Deposit amount").fill("1");
   await page.getByTestId("deposit-review").click();
   await signAndSend(page);
@@ -147,6 +154,8 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   await expect(page.getByTestId("keeper-cmd")).toContainText("npx tsx src/index.ts --dry-run");
 
   // Withdraw part of the quote: 0.1 USDC.X; budgets shrink in proportion.
+  await page.getByTestId("card-action-withdraw").click();
+  await expect(page.getByTestId("deposit-review")).toHaveCount(0); // one form open at a time
   await page.getByLabel("Withdraw mint").selectOption(USDC);
   await page.getByLabel("Withdraw amount").fill("0.1");
   await page.getByTestId("withdraw-review").click();
@@ -155,6 +164,7 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   await expect(page.getByTestId(`vault-${USDC}`).getByTestId("vault-balance")).toHaveAttribute("data-raw", "900000");
 
   // Native XNT: a new fund holds only its rent, so there is nothing to withdraw.
+  await page.getByTestId("card-action-native").click();
   const nativeLine = page.getByTestId("native-line");
   await expect(nativeLine).toHaveAttribute("data-available", "0");
   await expect(nativeLine).toContainText("Native XNT on the fund:");
@@ -196,6 +206,7 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   await page.evaluate(() => {
     (window as unknown as { __FUND_NFT_TEST_WALLET_DELAY_MS: number }).__FUND_NFT_TEST_WALLET_DELAY_MS = 4000;
   });
+  await page.getByTestId("card-action-deposit").click();
   await page.getByLabel("Deposit amount").fill("0.5");
   await page.getByTestId("deposit-review").click();
   await expect(page.getByTestId("review").getByTestId("sim-status")).toHaveText("simulation ok");

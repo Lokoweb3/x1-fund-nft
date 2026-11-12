@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { PublicKey } from "@solana/web3.js";
 import type { FundView } from "@core/rpc.js";
 import { readFundMetadata } from "@core/rpc.js";
@@ -9,6 +9,7 @@ import { formatShare, formatValue } from "../lib/format";
 import { sharePercent, sortByValue, type Valuation } from "../lib/value";
 import { resolvePicture, type PictureState } from "../lib/nft_picture";
 import { symOf, type ValuationState } from "./Holdings";
+import { CARD_ACTIONS, HELD_BY_PROGRAM_NOTE, HINT_HELD_BY_PROGRAM, type CardAction, type CardActionState } from "../lib/card_actions";
 
 /**
  * The picture for a metadata uri. Auto-fetches only X1 Inscriptions hosts;
@@ -172,6 +173,7 @@ export function NftCardView({
   holdings,
   view,
   labels,
+  actions,
 }: {
   stored: StoredMetadata | undefined;
   picture: PictureState;
@@ -179,6 +181,8 @@ export function NftCardView({
   holdings: ValuationState;
   view: FundView;
   labels: Record<string, TokenLabel>;
+  /** Action buttons (and the open form) shown at the bottom of the card. */
+  actions?: ReactNode;
 }) {
   const name = stored?.name || "Unnamed fund";
   const q = symOf(labels, view.account.quoteMint.toBase58());
@@ -210,6 +214,7 @@ export function NftCardView({
         )}
         <span className="small muted">Estimate, display only.</span>
       </figcaption>
+      {actions}
     </figure>
   );
 }
@@ -221,17 +226,84 @@ export function NftCard({
   sendTick,
   holdings,
   labels,
+  actions,
 }: {
   net: NetworkInfo;
   view: FundView;
   sendTick: number;
   holdings: ValuationState;
   labels: Record<string, TokenLabel>;
+  actions?: ReactNode;
 }) {
   const key = `${net.generation}|${net.rpcUrl}|${view.fund.toBase58()}|${view.account.nftMint.toBase58()}|${sendTick}`;
   const md = useStoredMetadata(net, view.account.nftMint, key);
   const { picture, allow } = usePicture(md.loaded ? md.stored?.uri : undefined, key);
-  return <NftCardView stored={md.stored} picture={md.loaded ? picture : { status: "loading" }} onAllow={allow} holdings={holdings} view={view} labels={labels} />;
+  return <NftCardView stored={md.stored} picture={md.loaded ? picture : { status: "loading" }} onAllow={allow} holdings={holdings} view={view} labels={labels} actions={actions} />;
+}
+
+const ACTION_LABEL: Record<CardAction, string> = { deposit: "Deposit", withdraw: "Withdraw", native: "Withdraw XNT" };
+
+/**
+ * The card's button row and the one open action form below it. Clicking the
+ * open action's button again, or the close button, closes it. `children` is
+ * the open action's form, built by the fund page.
+ */
+export function NftCardActions({
+  states,
+  open,
+  onToggle,
+  heldByProgram,
+  children,
+}: {
+  states: Record<CardAction, CardActionState>;
+  open: CardAction | null;
+  onToggle: (a: CardAction | null) => void;
+  heldByProgram: boolean;
+  children?: ReactNode;
+}) {
+  // The badge already explains a program holder; the hint line gives the other reasons.
+  const hints = [...new Set(CARD_ACTIONS.map((a) => states[a].hint))].filter((h): h is string => !!h && h !== HINT_HELD_BY_PROGRAM);
+  return (
+    <div className="nft-actions" data-testid="nft-actions">
+      {heldByProgram && (
+        <p className="warn small" role="status" data-testid="nft-escrow">
+          {HELD_BY_PROGRAM_NOTE}
+        </p>
+      )}
+      <div className="nft-action-row" role="group" aria-label="Fund actions">
+        {CARD_ACTIONS.map((a) => (
+          <button
+            key={a}
+            type="button"
+            className={open === a ? "primary" : undefined}
+            disabled={!states[a].enabled}
+            title={states[a].hint}
+            aria-expanded={open === a}
+            onClick={() => onToggle(open === a ? null : a)}
+            data-testid={`card-action-${a}`}
+          >
+            {ACTION_LABEL[a]}
+          </button>
+        ))}
+      </div>
+      {hints.length > 0 && (
+        <p className="small muted" data-testid="card-action-hint">
+          {`${hints.join(". ")}.`}
+        </p>
+      )}
+      {open && (
+        <div className="nft-action-panel" data-testid="card-action-panel" data-action={open}>
+          <div className="row between">
+            <strong>{ACTION_LABEL[open]}</strong>
+            <button type="button" className="link" onClick={() => onToggle(null)} aria-label={`Close ${ACTION_LABEL[open]}`} data-testid="card-action-close">
+              ×
+            </button>
+          </div>
+          {children}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** Small picture for a fund list item; its consent button is a separate PictureConsent in the item body. */
