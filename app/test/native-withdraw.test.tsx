@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { renderToString } from "react-dom/server";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import type { MintMeta } from "@core/owner.js";
-import type { FundView, NativeBalance, WithdrawNativeSummary } from "@core/rpc.js";
+import type { FundView, InexactNativeBalance, NativeBalance, WithdrawNativeSummary } from "@core/rpc.js";
 import { TOKEN_PROGRAM_ID } from "@core/pool.js";
 import { NativeWithdrawForm } from "../src/components/FundDetail.js";
 import { HoldingsCard } from "../src/components/Holdings.js";
@@ -16,41 +16,44 @@ import { ReviewPanel } from "../src/components/ReviewPanel.js";
 import type { AppState } from "../src/App.js";
 import { withdrawNativeSentences, type Review } from "../src/lib/actions.js";
 import { friendlyError, friendlySim, NATIVE_WITHDRAW_MISSING } from "../src/lib/errors.js";
-import { NATIVE_NOT_HOLDER, NATIVE_NOTHING, nativeBlocker, nativeLine, parseNativeAmount } from "../src/lib/native.js";
+import { exactAvailable, NATIVE_NOT_HOLDER, NATIVE_NOTHING, nativeBlocker, nativeLine, parseNativeAmount } from "../src/lib/native.js";
 import { createLocalTestWallet } from "../src/lib/signer.js";
 import { signerId } from "../src/lib/session.js";
 import { valueHoldings, withNative, WXNT_MINT } from "../src/lib/value.js";
 
 const k = () => Keypair.generate().publicKey;
-const balance: NativeBalance = { lamports: 2_501_559_040n, dataLength: 708, rentMinimum: 5_819_040n, available: 2_495_740_000n };
+// 2^53 + 2 lamports: above Number.MAX_SAFE_INTEGER, so the core cannot read it exactly.
+const inexact: InexactNativeBalance = { exact: false, approxLamports: 9_007_199_254_740_994, dataLength: 708 };
+const balance: NativeBalance = { exact: true, lamports: 2_501_559_040n, dataLength: 708, rentMinimum: 5_819_040n, available: 2_495_740_000n };
 
 test("amount: XNT decimal to exact lamports, 'all', and refusals", () => {
-  assert.equal(parseNativeAmount("1.5", false, balance.available), 1_500_000_000n);
-  assert.equal(parseNativeAmount("0.000000001", false, balance.available), 1n);
-  assert.equal(parseNativeAmount(" 2.49574 ", false, balance.available), 2_495_740_000n);
-  assert.equal(parseNativeAmount("", true, balance.available), "all");
-  assert.equal(parseNativeAmount("junk", true, balance.available), "all"); // the input is ignored with "all"
-  assert.throws(() => parseNativeAmount("0", false, balance.available), /greater than zero/);
-  assert.throws(() => parseNativeAmount("0.0000000001", false, balance.available), /more than 9 decimal places/);
-  assert.throws(() => parseNativeAmount("-1", false, balance.available), /non-negative decimal/);
-  assert.throws(() => parseNativeAmount("1e3", false, balance.available), /non-negative decimal/);
-  assert.throws(() => parseNativeAmount("", false, balance.available), /non-negative decimal/);
-  assert.throws(() => parseNativeAmount("2.495740001", false, balance.available), /more than the 2.49574 XNT available/);
+  assert.equal(parseNativeAmount("1.5", false, balance), 1_500_000_000n);
+  assert.equal(parseNativeAmount("0.000000001", false, balance), 1n);
+  assert.equal(parseNativeAmount(" 2.49574 ", false, balance), 2_495_740_000n);
+  assert.equal(parseNativeAmount("", true, balance), "all");
+  assert.equal(parseNativeAmount("junk", true, balance), "all"); // the input is ignored with "all"
+  assert.throws(() => parseNativeAmount("0", false, balance), /greater than zero/);
+  assert.throws(() => parseNativeAmount("0.0000000001", false, balance), /more than 9 decimal places/);
+  assert.throws(() => parseNativeAmount("-1", false, balance), /non-negative decimal/);
+  assert.throws(() => parseNativeAmount("1e3", false, balance), /non-negative decimal/);
+  assert.throws(() => parseNativeAmount("", false, balance), /non-negative decimal/);
+  assert.throws(() => parseNativeAmount("2.495740001", false, balance), /more than the 2.49574 XNT available/);
 });
 
 test("the balance line and the blockers", () => {
   assert.equal(nativeLine(balance), "Native XNT on the fund: 2.50155904 (available to withdraw: 2.49574; 0.00581904 stays for rent)");
-  assert.equal(nativeBlocker({ holder: true, available: 1n }), undefined);
-  assert.equal(nativeBlocker({ holder: false, available: 1n }), NATIVE_NOT_HOLDER);
-  assert.equal(nativeBlocker({ holder: true, available: 0n }), NATIVE_NOTHING);
-  assert.match(nativeBlocker({ holder: true, available: undefined, readError: "too large to read exactly" })!, /could not be read: too large/);
+  assert.equal(nativeBlocker({ holder: true, balance }), undefined);
+  assert.equal(nativeBlocker({ holder: false, balance }), NATIVE_NOT_HOLDER);
+  assert.equal(nativeBlocker({ holder: true, balance: { ...balance, available: 0n } }), NATIVE_NOTHING);
+  assert.match(nativeBlocker({ holder: true, balance: undefined, readError: "fund does not exist" })!, /could not be read: fund does not exist/);
+  assert.match(nativeBlocker({ holder: true, balance: undefined })!, /Reading/);
   assert.equal(NATIVE_NOTHING, "Nothing to withdraw yet. Native XNT arrives here from reflection tokens like Test or from direct transfers.");
 });
 
-const form = (o: { holder: boolean; available?: bigint; disabled?: boolean; error?: string }) =>
+const form = (o: { holder: boolean; available?: bigint; disabled?: boolean; error?: string; inexact?: boolean }) =>
   renderToString(
     <NativeWithdrawForm
-      native={o.error ? { error: o.error } : { balance: { ...balance, available: o.available ?? balance.available } }}
+      native={o.error ? { error: o.error } : { balance: o.inexact ? inexact : { ...balance, available: o.available ?? balance.available } }}
       holder={o.holder}
       disabled={o.disabled ?? false}
       onReview={() => {}}
@@ -196,4 +199,45 @@ test("holdings: native XNT is a labelled row, 1:1 in a WXNT fund, unpriced other
   assert.match(html, /counts 1:1 as WXNT/);
   const none = renderToString(<HoldingsCard state={{ status: "ok", valuation: base }} view={view} labels={labels} />);
   assert.doesNotMatch(none, /holding-native/);
+});
+
+test("inexact balance: approximate line, 'all' refused, typed amount allowed without an upper bound", () => {
+  assert.equal(nativeLine(inexact), "Native XNT on the fund: balance too large to display exactly (~9,007,199.255 XNT)");
+  assert.equal(exactAvailable(inexact), undefined);
+  assert.equal(exactAvailable(balance), balance.available);
+  assert.equal(exactAvailable(undefined), undefined);
+  assert.throws(() => parseNativeAmount("", true, inexact), /"all" is not available: the balance is too large/);
+  assert.equal(parseNativeAmount("1.5", false, inexact), 1_500_000_000n);
+  // No app-side upper bound: the program enforces the rent floor.
+  assert.equal(parseNativeAmount("10000000", false, inexact), 10_000_000_000_000_000n);
+  assert.throws(() => parseNativeAmount("0", false, inexact), /greater than zero/);
+  assert.throws(() => parseNativeAmount("0.0000000001", false, inexact), /more than 9 decimal places/);
+  assert.equal(nativeBlocker({ holder: true, balance: inexact }), undefined);
+  assert.equal(nativeBlocker({ holder: false, balance: inexact }), NATIVE_NOT_HOLDER);
+});
+
+test("inexact balance form: 'all' disabled, amount enabled, rent-floor note shown", () => {
+  const html = form({ holder: true, inexact: true });
+  assert.match(html, /data-available="inexact"/);
+  assert.match(html, /balance too large to display exactly \(~9,007,199.255 XNT\)/);
+  assert.match(html, /type="checkbox" disabled=""[^>]*aria-label="Withdraw all native XNT"/);
+  assert.doesNotMatch(html, /aria-label="Native XNT amount"[^>]*disabled/);
+  assert.doesNotMatch(html, /native-blocker/);
+  assert.match(html, /data-testid="native-inexact"/);
+  assert.match(html, /The program enforces the rent floor/);
+  // Not the holder: still the holder-only message.
+  assert.match(form({ holder: false, inexact: true }), /Only the wallet that holds the fund NFT can withdraw native XNT./);
+  // Exact balances show no inexact note.
+  assert.doesNotMatch(form({ holder: true }), /native-inexact/);
+});
+
+test("inexact review sentences say the amount was not checked and the program enforces the rent floor", () => {
+  const holder = k();
+  const s = { fund: k(), holder, nftAccount: undefined, balance: inexact, amount: 2_000_000_000n, payerHoldsNft: true } as unknown as WithdrawNativeSummary;
+  assert.deepEqual(withdrawNativeSentences(s), [
+    `You move 2 XNT (native) from the fund account to your wallet ${holder.toBase58()}.`,
+    "The fund's balance is too large to read exactly here (~9,007,199.255 XNT), so this amount was not checked in the app. " +
+      "The program enforces the rent floor: it refuses any amount that would take the fund account below its rent-exempt minimum.",
+    "The fund's token vaults, budgets and targets are not touched.",
+  ]);
 });

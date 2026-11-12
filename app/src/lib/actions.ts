@@ -412,12 +412,22 @@ export async function reviewWithdraw(
 /** Plain sentences for a native XNT withdraw (exported for tests). Network fees are appended by finishReview. */
 export function withdrawNativeSentences(s: WithdrawNativeSummary): string[] {
   const b = s.balance;
+  const first = `You move ${formatUi(s.amount, 9)} XNT (native) from the fund account to your wallet ${s.holder.toBase58()}.`;
+  const last = "The fund's token vaults, budgets and targets are not touched.";
+  if (!b.exact) {
+    return [
+      first,
+      `The fund's balance is too large to read exactly here (~${(b.approxLamports / 1e9).toLocaleString("en-US", { maximumFractionDigits: 3 })} XNT), so this amount was not checked in the app. ` +
+        "The program enforces the rent floor: it refuses any amount that would take the fund account below its rent-exempt minimum.",
+      last,
+    ];
+  }
   const left = b.available - s.amount;
   return [
-    `You move ${formatUi(s.amount, 9)} XNT (native) from the fund account to your wallet ${s.holder.toBase58()}.`,
+    first,
     `The fund account holds ${formatUi(b.lamports, 9)} XNT. ${formatUi(b.rentMinimum, 9)} XNT stays there for rent and can never be withdrawn; ` +
       `after this, ${formatUi(left, 9)} XNT is left to withdraw.`,
-    "The fund's token vaults, budgets and targets are not touched.",
+    last,
   ];
 }
 
@@ -428,12 +438,20 @@ export async function reviewWithdrawNative(net: NetworkInfo, payer: PublicKey, f
     ["Fund", s.fund.toBase58()],
     ["Holder (receives the XNT)", s.holder.toBase58()],
     ["NFT account", s.nftAccount ? `${s.nftAccount.address.toBase58()} (owner ${s.nftAccount.owner.toBase58()})` : "not found"],
-    ["Fund XNT", `${formatUi(b.lamports, 9)} (raw ${b.lamports})`],
-    ["Rent reserve", `${formatUi(b.rentMinimum, 9)} (rent-exempt minimum for ${b.dataLength} bytes; stays)`],
-    ["Available", `${formatUi(b.available, 9)} (raw ${b.available})`],
+    ...(b.exact
+      ? ([
+          ["Fund XNT", `${formatUi(b.lamports, 9)} (raw ${b.lamports})`],
+          ["Rent reserve", `${formatUi(b.rentMinimum, 9)} (rent-exempt minimum for ${b.dataLength} bytes; stays)`],
+          ["Available", `${formatUi(b.available, 9)} (raw ${b.available})`],
+        ] as Row[])
+      : ([
+          ["Fund XNT", `~${b.approxLamports} lamports (above 2^53 - 1, not exact)`],
+          ["Rent reserve", `not computed here; the program enforces it (${b.dataLength} bytes)`],
+        ] as Row[])),
     ["Amount", `${formatUi(s.amount, 9)} XNT (raw ${s.amount} lamports)`],
   ];
   const warnings: string[] = [];
+  if (!b.exact) warnings.push("The amount was not checked against the fund's balance in the app; the program refuses it if it would break the rent floor.");
   if (!s.payerHoldsNft) warnings.push(`${payer.toBase58()} does not hold the fund NFT; the program will reject this.`);
   return finishReview(net, payer, "Withdraw native XNT", { plan, rows, sentences: withdrawNativeSentences(s), warnings });
 }

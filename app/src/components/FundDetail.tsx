@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PublicKey } from "@solana/web3.js";
 import { formatUi, parseUi, shellQuote } from "@core/owner.js";
-import { loadFundView, readNativeBalance, type FundView, type NativeBalance } from "@core/rpc.js";
+import { loadFundView, readNativeBalance, type FundView } from "@core/rpc.js";
 import type { AppState } from "../App";
 import { makeProgram, reviewDeposit, reviewEnsureVaults, reviewWithdraw, reviewWithdrawNative, type Review } from "../lib/actions";
-import { nativeBlocker, nativeLine, parseNativeAmount } from "../lib/native";
+import { exactAvailable, NATIVE_INEXACT_NOTE, nativeBlocker, nativeLine, parseNativeAmount, type AnyNativeBalance } from "../lib/native";
 import { withNative } from "../lib/value";
 import { createLatest, sameView, type ViewIdentity } from "../lib/latest";
 import { signerId } from "../lib/session";
@@ -137,7 +137,8 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
   const labels = useTokenLabels(net, view ? [view.account.quoteMint, ...view.account.targets.map((t) => t.mint)] : []);
   // Display only: never passed to a review, a simulation or a transaction.
   const valuation = useValuation(net?.connection, view);
-  const nativeAvailable = native?.balance?.available;
+  // An inexact balance is never priced or totalled.
+  const nativeAvailable = exactAvailable(native?.balance);
   const holdings = useMemo<ValuationState>(
     () => (valuation.status === "ok" && view ? { status: "ok", valuation: withNative(valuation.valuation, view.account.quoteMint, nativeAvailable) } : valuation),
     [valuation, view, nativeAvailable],
@@ -426,7 +427,7 @@ function WithdrawForm({
 }
 
 /** The native XNT read that comes with a loaded view: the balance, or why it could not be read. */
-type NativeRead = { balance: NativeBalance; error?: undefined } | { balance?: undefined; error: string };
+type NativeRead = { balance: AnyNativeBalance; error?: undefined } | { balance?: undefined; error: string };
 
 /** "Withdraw native XNT": holder only, through the shared withdraw-native planner. */
 export function NativeWithdrawForm({
@@ -444,12 +445,13 @@ export function NativeWithdrawForm({
   const [all, setAll] = useState(false);
   const [error, setError] = useState("");
   const b = native.balance;
-  const blocker = nativeBlocker({ holder, available: b?.available, readError: native.error });
+  const blocker = nativeBlocker({ holder, balance: b, readError: native.error });
+  const allOff = !!blocker || (b !== undefined && !b.exact);
   const submit = () => {
     setError("");
     try {
       if (!b) throw new Error("the native balance is not loaded");
-      onReview(parseNativeAmount(amount, all, b.available));
+      onReview(parseNativeAmount(amount, all && b.exact, b));
     } catch (err) {
       setError(errMsg(err));
     }
@@ -457,7 +459,7 @@ export function NativeWithdrawForm({
   return (
     <div className="native-withdraw" data-testid="native-withdraw">
       {b && (
-        <p className="small" data-testid="native-line" data-available={b.available.toString()}>
+        <p className="small" data-testid="native-line" data-available={b.exact ? b.available.toString() : "inexact"}>
           {nativeLine(b)}
         </p>
       )}
@@ -467,20 +469,25 @@ export function NativeWithdrawForm({
           <input
             aria-label="Native XNT amount"
             inputMode="decimal"
-            value={all ? "" : amount}
-            disabled={all || !!blocker}
+            value={all && !allOff ? "" : amount}
+            disabled={(all && !allOff) || !!blocker}
             onChange={(e) => setAmount(e.target.value)}
-            placeholder={all ? "all" : "0.01"}
+            placeholder={all && !allOff ? "all" : "0.01"}
           />
         </label>
         <label>
-          <input type="checkbox" checked={all} disabled={!!blocker} onChange={(e) => setAll(e.target.checked)} aria-label="Withdraw all native XNT" /> all
+          <input type="checkbox" checked={all && !allOff} disabled={allOff} onChange={(e) => setAll(e.target.checked)} aria-label="Withdraw all native XNT" /> all
         </label>
-        <button disabled={disabled || !!blocker || (!all && !amount)} onClick={submit} data-testid="native-withdraw-review">
+        <button disabled={disabled || !!blocker || (!(all && !allOff) && !amount)} onClick={submit} data-testid="native-withdraw-review">
           Review native withdraw
         </button>
         {error && <span className="error">{error}</span>}
       </div>
+      {b && !b.exact && !native.error && (
+        <p className="small warn-text" data-testid="native-inexact">
+          {NATIVE_INEXACT_NOTE}
+        </p>
+      )}
       {blocker && (
         <p className="small muted" data-testid="native-blocker">
           {blocker}
