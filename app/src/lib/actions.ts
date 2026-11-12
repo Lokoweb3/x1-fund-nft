@@ -485,7 +485,7 @@ export async function reviewInscribe(net: NetworkInfo, payer: PublicKey, content
     ["Uri", p.uri],
   ];
   const warnings = [
-    "If someone else inscribes first, transaction 1 fails before it lands (the predicted number is taken) and nothing is charged; build the review again.",
+    "If someone else inscribes first, transaction 1 fails (the predicted number is taken). No inscription fee or rent is committed on that failure, but the network fee can still be charged if the transaction lands and fails. Build the review again.",
   ];
   if (p.txs.length > 1) {
     warnings.push(

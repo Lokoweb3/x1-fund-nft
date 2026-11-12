@@ -563,7 +563,8 @@ export function ArtStep({
               <p className="small muted">
                 Trust: X1 Inscriptions is a third-party program that its admin can upgrade, pause, or re-price. The JSON stays on chain, but wallets follow the
                 https link, which is an off-chain gateway run by the same third party. The number is a prediction: if someone inscribes first, transaction 1 fails
-                and nothing is charged. See docs/X1_INSCRIPTIONS.md.
+                and no inscription fee or rent is committed, but the network fee can still be charged if the transaction lands and fails. See
+                docs/X1_INSCRIPTIONS.md.
               </p>
               {verifiedOk ? (
                 <p className="ok" data-testid="inscribe-verified">
