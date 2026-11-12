@@ -311,7 +311,7 @@ function Shell() {
       (outcomes) => update(id, { status: "done", outcomes }),
       (err: unknown) => {
         if (err instanceof PlanSendError) {
-          update(id, { status: "failed", outcomes: err.done, error: err.message, failedSig: err.signature, failState: err.state, failedLastValid: err.lastValidBlockHeight });
+          update(id, { status: "failed", outcomes: err.done, error: err.message, failedSig: err.signature, failState: err.state, failedIndex: err.failedIndex, failedLastValid: err.lastValidBlockHeight });
           if (err.state === "unknown" && err.signature) {
             const signature = err.signature;
             setUnresolved((u) => [...u, { rpcUrl: review.rpcUrl, title: review.title, fund: review.plan.fund?.toBase58(), signature }]);

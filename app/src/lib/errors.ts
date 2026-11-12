@@ -16,8 +16,70 @@ export function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function friendlyError(err: unknown, opts: { cluster?: string } = {}): Friendly {
+/**
+ * Where a multi-transaction send stopped: the PlanSendError's fields (or the
+ * same fields kept on a send record). It scopes "nothing was sent" and
+ * "nothing was changed" to what is actually true.
+ */
+export interface SendScope {
+  /** Confirmed transactions, in order (they are transactions 1..done.length). */
+  done: ReadonlyArray<{ signature: string }>;
+  failedIndex: number;
+  total: number;
+}
+
+function scopeOf(err: unknown, given: SendScope | undefined): SendScope | undefined {
+  if (given) return given;
+  const e = err as Partial<{ name: string; done: { signature: string }[]; failedIndex: number; total: number }> | null;
+  if (e && typeof e === "object" && e.name === "PlanSendError" && Array.isArray(e.done) && typeof e.failedIndex === "number") {
+    return { done: e.done, failedIndex: e.failedIndex, total: typeof e.total === "number" ? e.total : e.failedIndex + 1 };
+  }
+  return undefined;
+}
+
+const cap = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
+const range = (from: number, to: number) => (from === to ? `transaction ${from} was` : `transactions ${from}–${to} were`);
+
+/** "Transaction 1 had already confirmed (signature X)." for the confirmed part, or "" if none. */
+function confirmedPart(sc: SendScope): string {
+  const n = sc.done.length;
+  if (n === 0) return "";
+  const which = n === 1 ? "Transaction 1 had" : `Transactions 1–${n} had`;
+  const sigs = sc.done.map((d) => d.signature).join(", ");
+  return `${which} already confirmed (signature${n === 1 ? "" : "s"} ${sigs})`;
+}
+
+/** The wallet declined transaction failedIndex: it and every later one were not sent. */
+function declined(sc: SendScope | undefined, raw: string): string {
+  if (!sc) {
+    // Without the send's fields, only the message says whether anything confirmed first.
+    return /confirmed before the failure/.test(raw)
+      ? "You declined in the wallet. Earlier transactions of this send had already confirmed (listed below); the rest were not sent."
+      : "You declined in the wallet. Nothing was sent.";
+  }
+  const no = sc.failedIndex + 1;
+  if (sc.done.length === 0) return sc.total > 1 ? `You declined transaction ${no} of ${sc.total} in the wallet. Nothing was sent.` : "You declined in the wallet. Nothing was sent.";
+  return `You declined transaction ${no} of ${sc.total} in the wallet. ${confirmedPart(sc)}; ${range(no, sc.total)} not sent.`;
+}
+
+/** An on-chain refusal of transaction failedIndex: that one changed nothing; earlier ones may have. */
+function refusedOnChain(sc: SendScope | undefined, raw: string, what: string): string {
+  if (!sc) {
+    return /confirmed before the failure/.test(raw)
+      ? `${what} That transaction changed nothing, but earlier transactions of this send had already confirmed (listed below).`
+      : `${what} Nothing was changed.`;
+  }
+  if (sc.done.length === 0 && sc.total === 1) return `${what} Nothing was changed.`;
+  const no = sc.failedIndex + 1;
+  const parts = [`${what} Transaction ${no} of ${sc.total} changed nothing.`];
+  if (sc.done.length > 0) parts.push(`${confirmedPart(sc)}.`);
+  if (no < sc.total) parts.push(`${cap(range(no + 1, sc.total))} not sent.`);
+  return parts.join(" ");
+}
+
+export function friendlyError(err: unknown, opts: { cluster?: string; send?: SendScope } = {}): Friendly {
   const raw = errText(err);
+  const sc = scopeOf(err, opts.send);
   if (/is not deployed on this RPC/.test(raw)) {
     return {
       title:
@@ -54,7 +116,7 @@ export function friendlyError(err: unknown, opts: { cluster?: string } = {}): Fr
     return { title: "Pay for the image from an ordinary wallet. The paying account must be a plain wallet account, so the program refused.", raw };
   }
   if (/PayerChanged|0x17a5\b|"Custom":6053/.test(raw)) {
-    return { title: "Token Metadata changed your wallet account, transaction refused. Nothing was changed.", raw };
+    return { title: refusedOnChain(sc, raw, "Token Metadata changed your wallet account, transaction refused."), raw };
   }
   if (/AttachCostTooHigh|0x17a3\b|"Custom":6051/.test(raw)) {
     return { title: "Attaching the NFT metadata would cost more than the program allows (0.03 XNT), so it refused.", raw };
@@ -72,7 +134,7 @@ export function friendlyError(err: unknown, opts: { cluster?: string } = {}): Fr
     return { title: "The inscription fee is higher than your maximum. Read the fee again and decide.", raw };
   }
   if (/User rejected|rejected the request/i.test(raw)) {
-    return { title: "You declined in the wallet. Nothing was sent.", raw };
+    return { title: declined(sc, raw), raw };
   }
   return { title: raw.split("\n")[0]!, raw };
 }

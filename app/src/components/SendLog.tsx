@@ -18,6 +18,8 @@ export interface SendRecord {
   error?: string;
   failedSig?: string;
   failState?: string;
+  /** Index of the transaction that did not confirm (PlanSendError.failedIndex). */
+  failedIndex?: number;
   /** For a failed tx that may have been submitted: the last block height it can land at. */
   failedLastValid?: number;
   created?: { fund: PublicKey; nftMint: PublicKey };
@@ -40,7 +42,12 @@ export function SendLog({
   return (
     <section className="panel sends" data-testid="sends">
       <h3>Transactions</h3>
-      {sends.map((r) => (
+      {sends.map((r) => {
+        // Scoped to this send: what confirmed before the failure, and what was never sent.
+        const friendly = r.error
+          ? friendlyError(r.error, r.failedIndex === undefined ? {} : { send: { done: r.outcomes, failedIndex: r.failedIndex, total: r.total } }).title
+          : undefined;
+        return (
         <div key={r.id} className={`send ${r.status}`} data-testid="send-record" data-status={r.status}>
           <div className="row between wrap">
             <strong>
@@ -73,7 +80,7 @@ export function SendLog({
           )}
           {r.status === "failed" && (
             <div className="error" data-testid="send-failed">
-              {r.error && friendlyError(r.error).title !== r.error.split("\n")[0] && <p data-testid="send-failed-friendly">{friendlyError(r.error).title}</p>}
+              {r.error && friendly !== r.error.split("\n")[0] && <p data-testid="send-failed-friendly">{friendly}</p>}
               <pre className="logs">{r.error}</pre>
               {r.outcomes.length > 0 && (
                 <ul>
@@ -106,7 +113,8 @@ export function SendLog({
             </p>
           )}
         </div>
-      ))}
+        );
+      })}
     </section>
   );
 }

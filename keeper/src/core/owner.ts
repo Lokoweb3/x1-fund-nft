@@ -657,6 +657,8 @@ export class PlanSendError extends Error {
      * confirmed transaction in `done` carries its own.
      */
     readonly lastValidBlockHeight?: number,
+    /** Number of transactions in the plan. */
+    readonly total?: number,
   ) {
     super(message);
     this.name = "PlanSendError";
@@ -707,7 +709,7 @@ export async function sendPlan(input: {
   const total = plan.txs.length;
   const done: TxOutcome[] = [];
   const fail = (i: number, what: string, state: FailedTxState, signature?: string, lastValid?: number) =>
-    new PlanSendError(partialFailureMessage(plan, done, i, what, state), [...done], i, state, signature, lastValid);
+    new PlanSendError(partialFailureMessage(plan, done, i, what, state), [...done], i, state, signature, lastValid, total);
   for (const [i, tx] of plan.txs.entries()) {
     let blockhash: string;
     let lastValidBlockHeight: number;
