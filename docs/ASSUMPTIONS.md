@@ -44,10 +44,11 @@ Denominators 10_000, 100_000, 10_000_000, and 1_000_000_000 with rate 2800 do no
 - Deposit rounding remainder goes to target 0, as specified.
 - `last_run` starts at 0, so the first crank is due immediately for any normal interval.
 - The fund NFT is a classic SPL token mint (decimals 0, no freeze authority, mint authority removed). `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` was executable on X1 mainnet at verification time. Token-2022 was also executable, at `TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`. The associated-token program `ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL` was executable there too.
-- `create_fund` does not require the target mint accounts to be present. A bad mint or pool is permanent and fails at `execute_dca`.
+- `create_fund` takes the quote mint as a named account and every non-cash target mint as a remaining account, in target order, skipping the cash slice. Each key must match and each mint must pass the extension allowlist below. A bad pool is still permanent and fails at `execute_dca`.
 - The cash slice is the target whose mint equals the quote mint. Its pool must be the all-zero pubkey. Every other target must pin a non-default pool. Mints are unique, pools other than the default are unique, each weight is non-zero, and the weights sum to 10_000. At most 8 targets.
 - `dt == 0` is rejected even when `twap_window_secs / 2` is 0, because the average divides by `dt`.
-- When the direct x32 price and the opposite x32 price are equal, the quote uses the direct side.
+- The quote always uses the cumulative that prices the swap direction (output per input). It never inverts the opposite side. A directional x32 average below `1 << 16` is rejected, so flooring the average costs at most 2^-16 of the price.
+- Parameter bounds: `max_dev_bps` at most 500, `twap_window_secs` in 900..=86_400, `interval_secs` at least 60. `execute_dca` rejects a min-out of 0.
 - The tip token account must be owned by the crank signer and use the quote mint.
 - A quote withdrawal's destination must be owned by the NFT holder. The NFT token account must contain amount 1 and name the holder as owner.
 - `anchor-spl` 1.2.2 `token_interface::mint_to` passes account infos as `[destination, mint, authority]`. `spl_token_2022::instruction::mint_to` orders them `[mint, destination, authority]`. `create_fund` invokes that instruction directly. `transfer_checked` and `set_authority` use the helpers; their account order matches the instruction builders.
@@ -96,11 +97,32 @@ X1 Mainnet pools, with the API's `tvl` field:
 - Agave 4.4.1 and Anchor's `solana-v4` feature were not built or tested.
 - `anchor-spl` 1.2.2's `mint_to` account order was read from the crate source and avoided. It was not executed.
 
+## Token-2022 mint extension allowlist
+
+`create_fund` (quote mint and every non-cash target mint), `deposit` (quote mint), and `execute_dca` (both mints, before any CPI) reject a Token-2022 mint whose TLV data has any extension type other than the ones below. Classic SPL Token mints pass. `withdraw` does not check, so a holder can always try to take out what the vault holds. The numbers are `ExtensionType` discriminants in `spl-token-2022-interface` 2.1.0, the version `Cargo.lock` resolves (`src/extension/mod.rs`). A unit test compares each constant with that enum.
+
+| Type | Extension |
+| --- | --- |
+| 1 | TransferFeeConfig |
+| 3 | MintCloseAuthority |
+| 10 | InterestBearingConfig |
+| 18 | MetadataPointer |
+| 19 | TokenMetadata |
+| 20 | GroupPointer |
+| 21 | TokenGroup |
+| 22 | GroupMemberPointer |
+| 23 | TokenGroupMember |
+| 25 | ScaledUiAmount |
+
+The scan stops at the first type-0 (`Uninitialized`) entry, as Token-2022 does. Unknown and future types are rejected. Excluded types include TransferHook, PermanentDelegate, Pausable, NonTransferable, DefaultAccountState, and the confidential-transfer extensions.
+
 ## Design risks
 
-- **Stale TWAP.** The quote never checks that the newest observation is close to `Clock::unix_timestamp`. Entries are written only on swaps, at least 15 seconds apart, and the cloned history had a gap of 86610 seconds. The rule "use the latest sample at or before `now - window`, else the oldest, and require `dt >= window/2`" accepts a 24 hour gap for a 1 hour window. The average then includes prices from that whole gap.
-- **Observation manipulation.** Anyone who can trade the pinned pool can move the cumulatives. A thin pool, or a window that only has the attacker's swaps, sets min-out. `max_dev_bps` is the only slack, and it is fixed at creation. A creator who sets it to 10_000 disables the guard. The keeper cannot tighten it.
-- **Upgradeable pool program.** The fund PDA signs the swap CPI. An upgrade of XDEX can change what that signature is allowed to do, including draining the vault, even if this program has been made immutable.
+- **Stale TWAP (fixed).** The quote now requires the newest observation to be no older than `twap_window_secs` before `Clock::unix_timestamp` and not in the future. The older sample is the latest at or before `now - window` (else the oldest), and the span must be within `[window / 2, 2 * window]`, so a 24 hour gap no longer passes a 1 hour window. Entries are still written only on swaps, at least 15 seconds apart. A pool nobody trades for longer than the window cannot be cranked until someone swaps.
+- **Inverted TWAP (fixed).** The quote used to pick the larger of the two cumulatives and invert it, which priced the reverse direction at `1 / E[P]` instead of `E[1/P]`. It now always uses the directional cumulative and rejects one below `1 << 16`.
+- **Observation manipulation (narrowed).** Anyone who can trade the pinned pool can still move the cumulatives. A thin pool, or a window that only has the attacker's swaps, sets min-out. `max_dev_bps` is now capped at 500 and the window is at least 900 seconds, so a creator can no longer disable the guard. The keeper still cannot tighten it.
+- **Upgradeable pool program (narrowed).** `execute_dca` now calls only the allowlisted XDEX program id (mainnet by default, testnet under the `testnet` feature). After the swap it requires the quote vault to have dropped by exactly the tip plus the swap input, and both vaults to still be owned by the fund with no delegate and no close authority. Within those bounds, an XDEX upgrade can still take the swap input and return only the TWAP minimum, which loses up to `max_dev_bps` per run, or it can fail every swap.
+- **Hostile mint extensions (fixed for new funds).** Quote and target mints must pass the extension allowlist above.
 - **Tip and schedule griefing.** The first caller after the interval takes 10 bps and sets `last_run`. A dust budget still counts as a run when the slice is non-zero, which pushes the next buy out by a full interval. The caller cannot set the price, but they choose the moment inside the deviation band.
 - **Rounding.** Deposit dust always accrues to target 0. Over many small deposits that target's budget runs ahead of its weight.
 - **Withdraw versus budgets.** Withdrawing the quote shrinks every remaining budget, including targets that have not bought yet. Withdrawing a bought token does not put quote budget back. A direct transfer of quote into the vault is not added to budgets; the holder can withdraw it, and a withdrawal at least as large as the budget sum zeros the budgets even if some quote is left over. That leftover cannot be swapped until a later deposit credits new budget.
