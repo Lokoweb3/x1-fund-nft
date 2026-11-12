@@ -8,9 +8,12 @@ import { createRequire } from "node:module";
 import type { Program as ProgramT } from "@anchor-lang/core";
 import {
   ComputeBudgetProgram,
+  Keypair,
   PublicKey,
   SystemProgram,
   TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
   type AccountMeta,
 } from "@solana/web3.js";
 import { assertSendAllowed, CLUSTERS, isCluster, type Cluster } from "./cluster.js";
@@ -40,8 +43,8 @@ const I64_MAX = (1n << 63n) - 1n;
 export const DEFAULT_COMPUTE_UNIT_LIMIT = 400_000;
 export const MAX_COMPUTE_UNIT_LIMIT = 1_400_000;
 
-export type Command = "create-fund" | "deposit" | "withdraw" | "show";
-export const COMMANDS: readonly Command[] = ["create-fund", "deposit", "withdraw", "show"];
+export type Command = "create-fund" | "deposit" | "withdraw" | "show" | "ensure-vaults";
+export const COMMANDS: readonly Command[] = ["create-fund", "deposit", "withdraw", "show", "ensure-vaults"];
 
 export interface TargetSpec {
   mint: PublicKey;
@@ -72,7 +75,8 @@ export type ParsedCli =
   | { command: "create-fund"; options: CommonOptions; create: CreateFundArgs }
   | { command: "deposit"; options: CommonOptions; fund: PublicKey; amount: bigint }
   | { command: "withdraw"; options: CommonOptions; fund: PublicKey; mint: PublicKey; amount: bigint | "all" }
-  | { command: "show"; options: CommonOptions; fund: PublicKey };
+  | { command: "show"; options: CommonOptions; fund: PublicKey }
+  | { command: "ensure-vaults"; options: CommonOptions; fund: PublicKey };
 
 const VALUE_FLAGS = new Set([
   "--quote",
@@ -96,6 +100,7 @@ const ALLOWED: Record<Command, string[]> = {
   deposit: ["--fund", "--amount"],
   withdraw: ["--fund", "--mint", "--amount"],
   show: ["--fund"],
+  "ensure-vaults": ["--fund"],
 };
 const COMMON = ["--payer", "--cluster", "--rpc", "--send", "--i-understand-mainnet"];
 
@@ -108,6 +113,7 @@ commands:
   deposit     --fund <pda> --amount <raw>
   withdraw    --fund <pda> --mint <mint> --amount <raw|all>
   show        --fund <pda>
+  ensure-vaults --fund <pda>   create any missing quote/target vault ATAs (idempotent)
 
 common flags:
   --payer <pubkey>          fee payer / signer for simulation when KEYPAIR is unset
@@ -236,6 +242,7 @@ export function parseCli(argv: string[]): ParsedCli {
       };
     }
     case "show":
+    case "ensure-vaults":
       return { command: cmd, options, fund: parsePubkey(need("--fund"), "--fund") };
   }
 }
@@ -432,4 +439,189 @@ export function formatUi(raw: bigint, decimals: number): string {
   const whole = abs / base;
   const frac = (abs % base).toString().padStart(decimals, "0").replace(/0+$/, "");
   return `${negative ? "-" : ""}${whole}${frac ? `.${frac}` : ""}`;
+}
+
+/** Largest serialized transaction the cluster accepts (PACKET_DATA_SIZE). */
+export const MAX_TX_BYTES = 1232;
+
+export interface MintMeta {
+  address: PublicKey;
+  tokenProgram: PublicKey;
+  decimals: number;
+  transferFee: TransferFeeConfig | undefined;
+}
+
+export interface PlannedTx {
+  label: string;
+  instructions: TransactionInstruction[];
+  extraSigners: Keypair[];
+}
+
+export interface Plan {
+  txs: PlannedTx[];
+  /** The fund this plan creates or touches, printed again on a partial failure. */
+  fund?: PublicKey;
+  /** Command to run if only some transactions confirmed. */
+  recovery?: string;
+}
+
+export interface TxOutcome {
+  label: string;
+  signature: string;
+}
+
+export type FailedTxState = "not sent" | "unknown" | "failed";
+
+/**
+ * Error text when transaction `failed` of a multi-transaction plan did not
+ * confirm. It lists what did confirm, says which transactions were not sent
+ * (the failing one only when it truly was not), and gives the recovery
+ * command when anything may have landed.
+ */
+export function partialFailureMessage(
+  plan: Plan,
+  done: TxOutcome[],
+  failed: number,
+  what: string,
+  state: FailedTxState,
+): string {
+  const total = plan.txs.length;
+  const name = (i: number) => `tx ${i + 1}/${total} (${plan.txs[i]!.label})`;
+  const lines = [`${name(failed)} ${what}`];
+  if (done.length === 0) {
+    lines.push("no earlier transaction confirmed");
+  } else {
+    lines.push("confirmed before the failure:");
+    done.forEach((d, i) => lines.push(`  ${name(i)}: ${d.signature}`));
+  }
+  const after = plan.txs.slice(failed + 1).map((_, k) => name(failed + 1 + k));
+  const notSent = state === "not sent" ? [name(failed), ...after] : after;
+  if (state === "unknown") lines.push(`${name(failed)} may or may not have landed; check the signature`);
+  if (state === "failed") lines.push(`${name(failed)} landed and failed; it changed nothing but fees`);
+  lines.push(notSent.length ? `not sent: ${notSent.join(", ")}` : "every transaction was submitted");
+  if (plan.fund) lines.push(`fund PDA: ${plan.fund.toBase58()}`);
+  if (plan.recovery && (done.length > 0 || state === "unknown")) lines.push(`recovery: ${plan.recovery}`);
+  return lines.join("\n");
+}
+
+/** Serialized size of the legacy transaction, signature slots included. */
+export function txSize(payer: PublicKey, instructions: TransactionInstruction[]): number {
+  const message = new TransactionMessage({
+    payerKey: payer,
+    // Any 32-byte value; the size does not depend on it.
+    recentBlockhash: PublicKey.default.toBase58(),
+    instructions,
+  }).compileToLegacyMessage();
+  return new VersionedTransaction(message).serialize().length;
+}
+
+/** Throws a clear error, before any RPC send, if a planned transaction is too large. */
+export function assertPlanFits(payer: PublicKey, plan: PlannedTx[], hint = ""): void {
+  plan.forEach((tx, i) => {
+    const size = txSize(payer, tx.instructions);
+    if (size > MAX_TX_BYTES) {
+      throw new Error(
+        `tx ${i + 1}/${plan.length} (${tx.label}) is ${size} bytes; the limit is ${MAX_TX_BYTES}. ` +
+          `Nothing was simulated or sent.${hint ? ` ${hint}` : ""}`,
+      );
+    }
+  });
+}
+
+/**
+ * create-fund plan. tx 1: compute budget + create_fund + quote vault ATA, so
+ * deposits work as soon as it confirms. tx 2 (when there are non-cash
+ * targets): the target vault ATAs execute_dca needs. They are separate
+ * transactions, not one atomic step: tx 1 can confirm while tx 2 is never
+ * sent. `ensure-vaults` recovers that.
+ */
+export async function planCreateFund(
+  program: ProgramT,
+  payer: PublicKey,
+  nft: Keypair,
+  args: CreateFundArgs,
+  quote: MintMeta,
+  targetMints: MintMeta[],
+  budget: TransactionInstruction[],
+): Promise<PlannedTx[]> {
+  const fund = fundPda(nft.publicKey, program.programId);
+  const createIx = await buildCreateFundIx(
+    program,
+    { creator: payer, nftMint: nft.publicKey, quoteMint: args.quote },
+    args,
+  );
+  const plan: PlannedTx[] = [
+    {
+      label: "create_fund + quote vault",
+      instructions: [...budget, createIx, createAtaIdempotentIx(payer, fund, quote.address, quote.tokenProgram)],
+      extraSigners: [nft],
+    },
+  ];
+  if (targetMints.length > 0) {
+    plan.push({
+      label: "target vaults",
+      instructions: [
+        ...budget,
+        ...targetMints.map((m) => createAtaIdempotentIx(payer, fund, m.address, m.tokenProgram)),
+      ],
+      extraSigners: [],
+    });
+  }
+  return plan;
+}
+
+/** Vault ATAs a fund needs: the quote vault, then each non-cash target vault. */
+export function fundVaults(
+  fund: PublicKey,
+  quote: MintMeta,
+  targetMints: MintMeta[],
+): Array<{ mint: MintMeta; vault: PublicKey }> {
+  return [quote, ...targetMints].map((mint) => ({
+    mint,
+    vault: associatedTokenAddress(fund, mint.address, mint.tokenProgram),
+  }));
+}
+
+// Token-2022 transfer fee, same layout as programs/fund_nft/src/token_fee.rs.
+export interface ScheduledFee {
+  epoch: bigint;
+  maximumFee: bigint;
+  basisPoints: number;
+}
+export interface TransferFeeConfig {
+  older: ScheduledFee;
+  newer: ScheduledFee;
+}
+
+/** The TransferFeeConfig (TLV type 1) in mint data, or undefined if absent. */
+export function readTransferFeeConfig(data: Buffer): TransferFeeConfig | undefined {
+  if (data.length < 166 || data[165] !== 1) return undefined;
+  let offset = 166;
+  while (offset + 4 <= data.length) {
+    const type = data.readUInt16LE(offset);
+    const len = data.readUInt16LE(offset + 2);
+    const value = offset + 4;
+    if (value + len > data.length) throw new Error("mint TLV data is truncated");
+    if (type === 0 && len === 0) break;
+    if (type === 1) {
+      if (len < 108) throw new Error(`transfer-fee extension has length ${len}, expected 108`);
+      const fee = (at: number): ScheduledFee => ({
+        epoch: data.readBigUInt64LE(at),
+        maximumFee: data.readBigUInt64LE(at + 8),
+        basisPoints: data.readUInt16LE(at + 16),
+      });
+      return { older: fee(value + 72), newer: fee(value + 90) };
+    }
+    offset = value + len;
+  }
+  return undefined;
+}
+
+/** Fee on a transfer of `amount` at `epoch`: ceil(amount * bps / 10000), capped at the maximum. */
+export function transferFeeFor(config: TransferFeeConfig | undefined, amount: bigint, epoch: bigint): bigint {
+  if (!config) return 0n;
+  const fee = epoch >= config.newer.epoch ? config.newer : config.older;
+  if (fee.basisPoints === 0 || amount === 0n) return 0n;
+  const raw = (amount * BigInt(fee.basisPoints) + 9_999n) / 10_000n;
+  return raw < fee.maximumFee ? raw : fee.maximumFee;
 }

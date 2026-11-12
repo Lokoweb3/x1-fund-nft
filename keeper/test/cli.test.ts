@@ -5,14 +5,23 @@ import { Connection, Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { X1_MAINNET_GENESIS_HASH, X1_TESTNET_GENESIS_HASH } from "../src/cluster.js";
 import { createProgram } from "../src/fund.js";
 import {
+  assertPlanFits,
   buildCreateFundIx,
   checkPool,
+  fundVaults,
+  MAX_TX_BYTES,
+  planCreateFund,
+  readTransferFeeConfig,
+  transferFeeFor,
+  txSize,
+  type MintMeta,
   computeBudget,
   createAtaIdempotentIx,
   createFundRemainingAccounts,
   formatUi,
   fundPda,
   parseCli,
+  partialFailureMessage,
   PROGRAM_ID,
   sendGate,
   validateCreateFund,
@@ -20,7 +29,12 @@ import {
   type CommonOptions,
   type CreateFundArgs,
 } from "../src/owner.js";
-import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID, type PoolAccounts } from "../src/pool.js";
+import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+  type PoolAccounts,
+} from "../src/pool.js";
 
 const require = createRequire(import.meta.url);
 const { AnchorProvider, Wallet } = require("@anchor-lang/core") as typeof import("@anchor-lang/core");
@@ -307,4 +321,164 @@ test("helpers: UI units, compute budget, ATA idempotent instruction", () => {
   assert.deepEqual([...ix.data], [1]);
   assert.ok(ix.keys[0]!.isSigner && ix.keys[0]!.pubkey.equals(payer));
   assert.ok(ix.keys[2]!.pubkey.equals(owner));
+});
+
+// ---- create-fund transaction sizes ----
+
+const sizeProgram = createProgram(
+  new AnchorProvider(new Connection("http://127.0.0.1:1"), new Wallet(Keypair.generate()), {}),
+);
+
+function mintMeta(tokenProgram: PublicKey): MintMeta {
+  return { address: Keypair.generate().publicKey, tokenProgram, decimals: 6, transferFee: undefined };
+}
+
+/** Plan for `nonCash` distinct Token-2022 targets, optionally plus a cash slice. */
+async function sizedPlan(quoteProgram: PublicKey, nonCash: number, cash: boolean) {
+  const payer = Keypair.generate().publicKey;
+  const quote = mintMeta(quoteProgram);
+  const mints = Array.from({ length: nonCash }, () => mintMeta(TOKEN_2022_PROGRAM_ID));
+  const targets = mints.map((m) => ({ mint: m.address, pool: Keypair.generate().publicKey, bps: 1 }));
+  if (cash) targets.unshift({ mint: quote.address, pool: PublicKey.default, bps: 1 });
+  const args = { quote: quote.address, targets, perRun: 1n, interval: 60n, window: 900, maxDevBps: 0 };
+  const plan = await planCreateFund(sizeProgram, payer, Keypair.generate(), args, quote, mints, computeBudget({}).instructions);
+  return { payer, plan, sizes: plan.map((tx) => txSize(payer, tx.instructions)) };
+}
+
+test("create-fund transaction sizes: what fits and what is refused", async () => {
+  // Expected tx 1 size by non-cash target count, Token-2022 quote, with the
+  // compute-budget instructions. Measured offline; each target adds 99 bytes
+  // (66 bytes of params + a 32-byte remaining account + 1).
+  const t22 = [724, 824, 923, 1022, 1121, 1220, 1319, 1418];
+  for (let n = 1; n <= 8; n++) {
+    const { payer, plan, sizes } = await sizedPlan(TOKEN_2022_PROGRAM_ID, n, false);
+    assert.equal(sizes[0], t22[n - 1], `t22 quote, ${n} targets`);
+    // tx 2 (target vaults) always fits, even with 8 targets.
+    assert.ok(sizes[1]! <= MAX_TX_BYTES, `tx 2 with ${n} targets is ${sizes[1]}`);
+    if (n <= 6) {
+      assert.doesNotThrow(() => assertPlanFits(payer, plan));
+    } else {
+      assert.throws(
+        () => assertPlanFits(payer, plan),
+        new RegExp(`tx 1/2 \\(create_fund \\+ quote vault\\) is ${t22[n - 1]} bytes; the limit is 1232\\. Nothing was simulated or sent`),
+      );
+    }
+  }
+  // With a cash slice the cash target costs 66 bytes but no remaining account.
+  // Token-2022 quote: cash + 5 = 1187 fits, cash + 6 = 1286 does not.
+  // Classic quote: cash + 5 = 1155 fits, cash + 6 = 1254 does not.
+  for (const qp of [TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID]) {
+    let maxFit = -1;
+    for (let n = 0; n <= 7; n++) {
+      const { payer, plan } = await sizedPlan(qp, n, true);
+      try {
+        assertPlanFits(payer, plan);
+        maxFit = n;
+      } catch (err) {
+        assert.match(String(err), /the limit is 1232/);
+      }
+    }
+    assert.equal(maxFit, 5, `${qp.toBase58()} quote with a cash slice fits cash + 5 targets`);
+  }
+  // Classic quote, no cash slice: 6 fit (1188), 7 do not (1287).
+  const classic6 = await sizedPlan(TOKEN_PROGRAM_ID, 6, false);
+  const classic7 = await sizedPlan(TOKEN_PROGRAM_ID, 7, false);
+  assert.deepEqual([classic6.sizes[0], classic7.sizes[0]], [1188, 1287]);
+  assert.doesNotThrow(() => assertPlanFits(classic6.payer, classic6.plan));
+  assert.throws(() => assertPlanFits(classic7.payer, classic7.plan), /1287 bytes/);
+});
+
+test("create-fund plan: tx 1 has create_fund and the quote vault, tx 2 the target vaults", async () => {
+  const { plan } = await sizedPlan(TOKEN_2022_PROGRAM_ID, 2, true);
+  assert.equal(plan.length, 2);
+  assert.equal(plan[0]!.extraSigners.length, 1, "the NFT mint signs tx 1");
+  // compute limit, compute price, create_fund, quote ATA
+  assert.deepEqual(
+    plan[0]!.instructions.map((ix) => ix.programId.toBase58()),
+    [
+      "ComputeBudget111111111111111111111111111111",
+      "ComputeBudget111111111111111111111111111111",
+      PROGRAM_ID.toBase58(),
+      ASSOCIATED_TOKEN_PROGRAM_ID.toBase58(),
+    ],
+  );
+  assert.equal(plan[1]!.instructions.filter((ix) => ix.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID)).length, 2);
+  // A cash-only fund has no tx 2.
+  const cashOnly = await sizedPlan(TOKEN_2022_PROGRAM_ID, 0, true);
+  assert.equal(cashOnly.plan.length, 1);
+  // fundVaults lists the quote vault first, then targets, as ATAs of the fund.
+  const fund = Keypair.generate().publicKey;
+  const q = mintMeta(TOKEN_2022_PROGRAM_ID);
+  const t = mintMeta(TOKEN_PROGRAM_ID);
+  const vaults = fundVaults(fund, q, [t]);
+  assert.equal(vaults.length, 2);
+  const [expectedQuote] = PublicKey.findProgramAddressSync(
+    [fund.toBuffer(), TOKEN_2022_PROGRAM_ID.toBuffer(), q.address.toBuffer()],
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+  );
+  assert.ok(vaults[0]!.vault.equals(expectedQuote));
+});
+
+test("partial failure message is honest about what was sent", async () => {
+  const { plan: txs } = await sizedPlan(TOKEN_2022_PROGRAM_ID, 1, true);
+  const fund = Keypair.generate().publicKey;
+  const plan = { txs, fund, recovery: `npx tsx src/cli.ts ensure-vaults --fund ${fund.toBase58()}` };
+  const done = [{ label: txs[0]!.label, signature: "SIG1" }];
+
+  // tx 1 confirmed, tx 2 rejected before landing.
+  const notSent = partialFailureMessage(plan, done, 1, "was rejected before landing: boom", "not sent");
+  assert.match(notSent, /confirmed before the failure:\n {2}tx 1\/2 \(create_fund \+ quote vault\): SIG1/);
+  assert.match(notSent, /not sent: tx 2\/2 \(target vaults\)/);
+  assert.match(notSent, new RegExp(`fund PDA: ${fund.toBase58()}`));
+  assert.match(notSent, /recovery: npx tsx src\/cli\.ts ensure-vaults/);
+  assert.doesNotMatch(notSent, /nothing (was )?sent|no transaction was sent/i);
+
+  // tx 2 sent but unconfirmed: not listed as "not sent".
+  const unknown = partialFailureMessage(plan, done, 1, "SIG2 was sent but its status is unknown", "unknown");
+  assert.match(unknown, /may or may not have landed/);
+  assert.match(unknown, /every transaction was submitted/);
+  assert.match(unknown, /recovery:/);
+
+  // tx 1 rejected: nothing confirmed, both listed as not sent, no recovery needed.
+  const first = partialFailureMessage(plan, [], 0, "was rejected before landing: boom", "not sent");
+  assert.match(first, /no earlier transaction confirmed/);
+  assert.match(first, /not sent: tx 1\/2 \(create_fund \+ quote vault\), tx 2\/2 \(target vaults\)/);
+  assert.doesNotMatch(first, /recovery:/);
+});
+
+test("ensure-vaults parses", () => {
+  const parsed = parseCli(["ensure-vaults", "--fund", QUOTE, "--payer", QUOTE]);
+  assert.equal(parsed.command, "ensure-vaults");
+  assert.throws(() => parseCli(["ensure-vaults"]), /requires --fund/);
+  assert.throws(() => parseCli(["ensure-vaults", "--fund", QUOTE, "--amount", "1"]), /unknown or misplaced/);
+});
+
+test("transfer fee: TLV parse and fee math", () => {
+  // Mint base (82) + padding to 165 + account type + one TLV entry of type 1.
+  const data = Buffer.alloc(166 + 4 + 108);
+  data[165] = 1;
+  data.writeUInt16LE(1, 166);
+  data.writeUInt16LE(108, 168);
+  const value = 170;
+  // older: epoch 0, max 1000, 100 bps; newer: epoch 10, max u64::MAX, 500 bps
+  data.writeBigUInt64LE(0n, value + 72);
+  data.writeBigUInt64LE(1000n, value + 80);
+  data.writeUInt16LE(100, value + 88);
+  data.writeBigUInt64LE(10n, value + 90);
+  data.writeBigUInt64LE((1n << 64n) - 1n, value + 98);
+  data.writeUInt16LE(500, value + 106);
+  const cfg = readTransferFeeConfig(data)!;
+  assert.equal(cfg.older.basisPoints, 100);
+  assert.equal(cfg.newer.basisPoints, 500);
+  // Before epoch 10 the older fee applies, capped at 1000.
+  assert.equal(transferFeeFor(cfg, 1_000n, 5n), 10n);
+  assert.equal(transferFeeFor(cfg, 1_000_000n, 5n), 1000n);
+  // From epoch 10 the newer fee applies; ceil(1001 * 500 / 10000) = 51.
+  assert.equal(transferFeeFor(cfg, 1_001n, 10n), 51n);
+  assert.equal(transferFeeFor(undefined, 1_000n, 10n), 0n);
+  // No extension: classic-length mint, or Token-2022 mint without type 1.
+  assert.equal(readTransferFeeConfig(Buffer.alloc(82)), undefined);
+  const noFee = Buffer.alloc(170);
+  noFee[165] = 1;
+  assert.equal(readTransferFeeConfig(noFee), undefined);
 });

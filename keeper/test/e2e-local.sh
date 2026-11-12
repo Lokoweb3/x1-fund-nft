@@ -258,10 +258,39 @@ NFT="$(sed -n 's/^NFT mint (generated in memory): *//p' "$OUT")"
 expect_out "create-fund confirmed both transactions" "tx 2/2 .*"
 [ "$(grep -c 'sent and confirmed' "$OUT")" = 2 ] && pass "two confirmed signatures" || fail "expected two confirmations"
 
+echo; echo "== ensure-vaults is idempotent on a complete fund"
+for round in 1 2; do
+  run_ok "$PAYER_KEY" "ensure-vaults round $round" ensure-vaults --fund "$FUND" --send --cluster localnet
+  expect_out "round $round: all vaults exist, nothing sent" "all 2 vaults exist; nothing to do"
+  if grep -q "sent and confirmed" "$OUT"; then fail "round $round sent a transaction"; else pass "round $round sent nothing"; fi
+done
+
+echo; echo "== ensure-vaults recovers a fund whose vault transaction never ran"
+if (cd "$KEEPER" && KEYPAIR="$PAYER_KEY" RPC_URL="$URL" npx tsx test/e2e-bare-fund.ts \
+      "$USDC" 2000 "$TEST_MINT" "$POOL" 8000) >"$OUT" 2>&1; then
+  pass "bare create_fund (no vault ATAs)"
+else
+  fail "bare create_fund (exit $?)"
+fi
+sed 's/^/    /' "$OUT"
+BARE="$(sed -n 's/^fund PDA: *//p' "$OUT")"
+[ -n "$BARE" ] && pass "bare fund PDA: $BARE" || fail "no bare fund PDA"
+run_ok "" "show bare fund: vaults missing" show --fund "$BARE"
+[ "$(grep -c ' missing$' "$OUT")" = 2 ] && pass "bare fund has 2 missing vaults" || fail "bare fund vaults not missing"
+run_ok "$PAYER_KEY" "ensure-vaults creates the missing vaults" ensure-vaults --fund "$BARE" --send --cluster localnet
+expect_out "both vaults reported missing" "creating 2 missing vault\\(s\\)"
+expect_out "vault transaction confirmed" "tx 1/1 \\(ensure vaults\\) sent and confirmed"
+run_ok "$PAYER_KEY" "ensure-vaults again" ensure-vaults --fund "$BARE" --send --cluster localnet
+expect_out "second run: nothing to do" "all 2 vaults exist; nothing to do"
+run_ok "" "show bare fund after recovery" show --fund "$BARE"
+expect_out "bare quote vault exists" "$USDC [1-9A-HJ-NP-Za-km-z]+ 0 \\(raw 0\\)"
+expect_out "bare TEST vault exists" "$TEST_MINT [1-9A-HJ-NP-Za-km-z]+ 0 \\(raw 0\\)"
+
 echo; echo "== deposit"
 run_ok "" "deposit simulate-only" deposit --fund "$FUND" --amount 1000000 --payer "$PAYER"
 run_ok "$PAYER_KEY" "deposit --send 1 USDC.X" deposit --fund "$FUND" --amount 1000000 --send --cluster localnet
 expect_out "deposit summary in UI units" "amount +1 of $USDC \\(raw 1000000\\)"
+expect_out "budget preview is labelled pre transfer-fee" "budget preview \\(pre transfer-fee, approximate\\)"
 
 echo; echo "== show"
 run_ok "" "show" show --fund "$FUND"
@@ -279,7 +308,7 @@ else
   fail "keeper --dry-run (exit $?)"
 fi
 sed 's/^/    /' "$OUT"
-expect_out "keeper finds 1 due target" "1 fund accounts, 1 due targets"
+expect_out "keeper finds 1 due target (bare fund has no budget)" "2 fund accounts, 1 due targets"
 expect_out "keeper targets the TEST vault" "\"targetIndex\": 1"
 
 echo; echo "== withdraw"
