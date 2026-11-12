@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 anchor-client = "1.2.2"
 anchor-lang = "1.2.2"
+anchor-spl = { version = "1.2.2", features = ["metadata"] }
 base64 = "0.22"
 fund_nft = { path = "../programs/fund_nft", features = ["no-entrypoint"] }
 serde_json = "1"

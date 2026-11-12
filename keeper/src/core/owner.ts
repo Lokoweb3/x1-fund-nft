@@ -25,6 +25,7 @@ import {
 } from "@solana/web3.js";
 import type { Cluster } from "./cluster.js";
 import { IDL } from "./fund.js";
+import { buildAttachMetadataIx, type MetadataFields } from "./metadata.js";
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID, type PoolAccounts } from "./pool.js";
 
 export const PROGRAM_ID = new PublicKey(IDL.address);
@@ -282,6 +283,13 @@ export interface PlannedTx {
   label: string;
   instructions: TransactionInstruction[];
   extraSigners: Keypair[];
+  /**
+   * Needs an account an earlier transaction of the same plan creates (for
+   * example attach_metadata needs the fund create_fund makes), so it cannot
+   * be simulated before that one confirms. Callers size-check it up front
+   * and rely on the RPC's preflight simulation when it is sent.
+   */
+  dependsOnPrevious?: boolean;
 }
 
 export interface Plan {
@@ -357,10 +365,13 @@ export function assertPlanFits(payer: PublicKey, plan: PlannedTx[], hint = ""): 
 
 /**
  * create-fund plan. tx 1: compute budget + create_fund + quote vault ATA, so
- * deposits work as soon as it confirms. tx 2 (when there are non-cash
- * targets): the target vault ATAs execute_dca needs. They are separate
- * transactions, not one atomic step: tx 1 can confirm while tx 2 is never
- * sent. `ensure-vaults` recovers that.
+ * deposits work as soon as it confirms. Then, when `metadata` is given,
+ * attach_metadata (Metaplex metadata + master edition), kept out of tx 1 so
+ * create_fund's size limit does not change; it depends on tx 1. Last (when
+ * there are non-cash targets): the target vault ATAs execute_dca needs.
+ * They are separate transactions, not one atomic step: tx 1 can confirm
+ * while the rest are never sent. `set-metadata` and `ensure-vaults` recover
+ * that.
  */
 export async function planCreateFund(
   program: ProgramT,
@@ -370,6 +381,7 @@ export async function planCreateFund(
   quote: MintMeta,
   targetMints: MintMeta[],
   budget: TransactionInstruction[],
+  metadata?: MetadataFields,
 ): Promise<PlannedTx[]> {
   const fund = fundPda(nft.publicKey, program.programId);
   const createIx = await buildCreateFundIx(
@@ -384,6 +396,18 @@ export async function planCreateFund(
       extraSigners: [nft],
     },
   ];
+  if (metadata) {
+    const attachIx = await buildAttachMetadataIx(
+      program,
+      {
+        holder: payer,
+        nftMint: nft.publicKey,
+        nftAccount: associatedTokenAddress(payer, nft.publicKey, NFT_TOKEN_PROGRAM_ID),
+      },
+      metadata,
+    );
+    plan.push({ label: "attach_metadata", instructions: [...budget, attachIx], extraSigners: [], dependsOnPrevious: true });
+  }
   if (targetMints.length > 0) {
     plan.push({
       label: "target vaults",
@@ -512,6 +536,37 @@ export function ensureVaultsCommandLine(input: {
     `--payer ${input.payer.toBase58()}`,
     `--rpc ${shellQuote(input.rpcUrl)}`,
   ];
+  if (input.send) {
+    parts.push("--send");
+    if (input.cluster) parts.push(`--cluster ${input.cluster}`);
+    if (input.iUnderstandMainnet) parts.push("--i-understand-mainnet");
+  }
+  const prefix = input.send ? "KEYPAIR='REPLACE_WITH_THE_SAME_KEYPAIR_PATH' " : "";
+  return prefix + parts.join(" ");
+}
+
+/**
+ * Copyable set-metadata command with the given fields (shell-quoted). Same
+ * placeholder rule as ensureVaultsCommandLine for the keypair.
+ */
+export function setMetadataCommandLine(input: {
+  fund: PublicKey;
+  payer: PublicKey;
+  rpcUrl: string;
+  send: boolean;
+  cluster: Cluster | undefined;
+  iUnderstandMainnet: boolean;
+  fields: Partial<MetadataFields>;
+}): string {
+  const parts = [
+    "npx tsx src/cli.ts set-metadata",
+    `--fund ${input.fund.toBase58()}`,
+    `--payer ${input.payer.toBase58()}`,
+    `--rpc ${shellQuote(input.rpcUrl)}`,
+  ];
+  if (input.fields.name !== undefined) parts.push(`--name ${shellQuote(input.fields.name)}`);
+  if (input.fields.symbol !== undefined) parts.push(`--symbol ${shellQuote(input.fields.symbol)}`);
+  if (input.fields.uri !== undefined) parts.push(`--uri ${shellQuote(input.fields.uri)}`);
   if (input.send) {
     parts.push("--send");
     if (input.cluster) parts.push(`--cluster ${input.cluster}`);

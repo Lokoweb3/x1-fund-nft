@@ -23,7 +23,7 @@ testnet = []
 
 [dependencies]
 anchor-lang = "1.2.2"
-anchor-spl = "1.2.2"
+anchor-spl = { version = "1.2.2", features = ["metadata"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

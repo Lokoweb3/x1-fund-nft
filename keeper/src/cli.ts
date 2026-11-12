@@ -7,10 +7,13 @@
  * hash is checked before any keypair is loaded. See README.md.
  *
  * A command may need more than one transaction (create-fund: create_fund +
- * quote vault, then the target vaults). They are not atomic. Every planned
- * transaction is size-checked and simulated before the first one is sent; if
- * a later one then fails to send or confirm, the CLI prints what did confirm,
- * what was not sent, and the recovery command.
+ * quote vault, then attach_metadata when --name/--symbol/--uri are given,
+ * then the target vaults). They are not atomic. Every planned transaction is
+ * size-checked before the first one is sent, and simulated then too, except
+ * one that needs an account an earlier one creates (attach_metadata needs the
+ * fund): that one is simulated by the RPC's preflight when it is sent. If a
+ * later one fails to send or confirm, the CLI prints what did confirm, what
+ * was not sent, and the recovery commands.
  *
  * The planners (core/rpc.ts) and builders (core/owner.ts) are shared with the
  * web app in app/; this file only prints and signs with a Keypair.
@@ -26,10 +29,13 @@ import {
   computeBudget,
   ensureVaultsCommandLine,
   formatUi,
+  setMetadataCommandLine,
+  type MetadataFields,
   keypairSigner,
   parseCli,
   sendGate,
   sendPlan,
+  txSize,
   XDEX_PROGRAM_ID,
   type CommonOptions,
   type ComputeBudget,
@@ -43,7 +49,9 @@ import {
   prepareCreateFund,
   prepareDeposit,
   prepareEnsureVaults,
+  prepareSetMetadata,
   prepareWithdraw,
+  readFundMetadata,
   simulateTx,
   type PlanContext,
 } from "./core/rpc.js";
@@ -137,6 +145,9 @@ async function main(): Promise<void> {
     case "ensure-vaults":
       plan = await planEnsureVaults(ctx, parsed.fund);
       break;
+    case "set-metadata":
+      plan = await planSetMetadata(ctx, parsed);
+      break;
   }
   await run(ctx, plan);
 }
@@ -153,6 +164,19 @@ function ensureVaultsCommand(ctx: Ctx, fund: PublicKey): string {
   });
 }
 
+/** Shell command line for set-metadata with the same RPC and send flags. */
+function setMetadataCommand(ctx: Ctx, fund: PublicKey, fields: Partial<MetadataFields>): string {
+  return setMetadataCommandLine({
+    fund,
+    payer: ctx.payer,
+    rpcUrl: ctx.rpcUrl,
+    send: ctx.send,
+    cluster: ctx.options.cluster,
+    iUnderstandMainnet: ctx.options.iUnderstandMainnet,
+    fields,
+  });
+}
+
 async function planCreate(ctx: Ctx, parsed: Extract<ParsedCli, { command: "create-fund" }>): Promise<Plan> {
   const args = parsed.create;
   let xdex = XDEX_PROGRAM_ID;
@@ -162,7 +186,7 @@ async function planCreate(ctx: Ctx, parsed: Extract<ParsedCli, { command: "creat
     }
     xdex = parsed.options.xdex;
   }
-  const prepared = await prepareCreateFund(planContext(ctx), args, xdex);
+  const prepared = await prepareCreateFund(planContext(ctx), args, xdex, parsed.metadata);
   const { nft, fund, quote, plan } = prepared;
 
   console.log(`NFT mint (generated in memory): ${nft.publicKey.toBase58()}`);
@@ -182,14 +206,29 @@ async function planCreate(ctx: Ctx, parsed: Extract<ParsedCli, { command: "creat
     );
   });
   console.log(`  NFT goes to      ${prepared.nftAccount.toBase58()}`);
+  const md = parsed.metadata;
+  if (md) {
+    console.log(`  NFT metadata     name ${JSON.stringify(md.name)}, symbol ${JSON.stringify(md.symbol)}`);
+    console.log(`                   uri ${md.uri}`);
+    console.log("                   update authority: the fund PDA, changed only by the NFT holder (set-metadata)");
+  } else {
+    console.log("  NFT metadata     none (attach later with set-metadata)");
+  }
   for (const { mint, vault } of prepared.vaults) {
     const which = mint.address.equals(args.quote) ? "quote vault ATA " : "target vault ATA";
     console.log(`  ${which} ${vault.toBase58()} (${mint.address.toBase58()}, created idempotently)`);
   }
   if (plan.txs.length > 1) {
-    console.log("  note: these are separate transactions, not one atomic step; ensure-vaults recovers missing vaults");
+    console.log(
+      "  note: these are separate transactions, not one atomic step; " +
+        (md ? "set-metadata recovers missing metadata and " : "") +
+        "ensure-vaults recovers missing vaults",
+    );
   }
-  return { ...plan, recovery: ensureVaultsCommand(ctx, fund) };
+  const recovery = md
+    ? `${setMetadataCommand(ctx, fund, md)}\n  then: ${ensureVaultsCommand(ctx, fund)}`
+    : ensureVaultsCommand(ctx, fund);
+  return { ...plan, recovery };
 }
 
 async function planDeposit(ctx: Ctx, parsed: Extract<ParsedCli, { command: "deposit" }>): Promise<Plan> {
@@ -257,6 +296,25 @@ async function planEnsureVaults(ctx: Ctx, fundKey: PublicKey): Promise<Plan> {
   return { ...plan, recovery: ensureVaultsCommand(ctx, fundKey) };
 }
 
+async function planSetMetadata(ctx: Ctx, parsed: Extract<ParsedCli, { command: "set-metadata" }>): Promise<Plan> {
+  const { plan, summary: s } = await prepareSetMetadata(planContext(ctx), parsed.fund, parsed.update);
+  console.log(`\nSummary of set-metadata (${s.mode === "attach" ? "attach_metadata" : "update_metadata"}):`);
+  console.log(`  fund             ${s.fund.toBase58()}`);
+  console.log(`  NFT mint         ${s.nftMint.toBase58()}`);
+  console.log(`  holder           ${s.holder.toBase58()}`);
+  console.log(`  NFT account      ${s.nftAccount ? `${s.nftAccount.address.toBase58()} (owner ${s.nftAccount.owner.toBase58()})` : "not found"}`);
+  console.log(`  metadata         ${s.metadata.toBase58()}${s.current ? "" : " (created by this transaction, with the master edition)"}`);
+  const row = (label: string, before: string | undefined, after: string) =>
+    console.log(`  ${label.padEnd(16)} ${before === undefined || before === after ? JSON.stringify(after) : `${JSON.stringify(before)} -> ${JSON.stringify(after)}`}`);
+  row("name", s.current?.name, s.next.name);
+  row("symbol", s.current?.symbol, s.next.symbol);
+  row("uri", s.current?.uri, s.next.uri);
+  if (!s.payerHoldsNft) {
+    console.log(`  WARNING: ${ctx.payer.toBase58()} does not hold the fund NFT; the program will reject this`);
+  }
+  return plan;
+}
+
 async function show(connection: Connection, program: ProgramT, fundKey: PublicKey): Promise<void> {
   const now = BigInt(Math.floor(Date.now() / 1000));
   const v = await loadFundView(connection, program, fundKey, now);
@@ -264,6 +322,14 @@ async function show(connection: Connection, program: ProgramT, fundKey: PublicKe
   console.log(`fund             ${fundKey.toBase58()}`);
   console.log(`NFT mint         ${v.account.nftMint.toBase58()}`);
   console.log(`NFT holder       ${v.nftAccount ? v.nftAccount.owner.toBase58() : "unknown"}`);
+  const md = await readFundMetadata(connection, v.account.nftMint);
+  if (md.stored) {
+    console.log(`NFT metadata     ${JSON.stringify(md.stored.name)} (${JSON.stringify(md.stored.symbol)}) ${md.stored.uri}`);
+    console.log(`                 account ${md.address.toBase58()}, update authority ${md.stored.updateAuthority.toBase58()}`);
+    console.log(`                 master edition ${md.edition.toBase58()} ${md.editionExists ? "exists" : "MISSING"}`);
+  } else {
+    console.log("NFT metadata     none");
+  }
   console.log(`quote mint       ${v.account.quoteMint.toBase58()} (${d} decimals${feeNote(v.quote)})`);
   console.log(`per run          ${formatUi(v.perRun, d)} (raw ${v.perRun})`);
   console.log(`interval         ${v.interval} s`);
@@ -305,6 +371,15 @@ async function run(ctx: Ctx, plan: Plan): Promise<void> {
   const header = (i: number) => `tx ${i + 1}/${txs.length} (${txs[i]!.label})`;
   for (const [i, tx] of txs.entries()) {
     const signers = [ctx.payer, ...tx.extraSigners.map((k) => k.publicKey)].map((k) => k.toBase58());
+    if (tx.dependsOnPrevious) {
+      const size = txSize(ctx.payer, tx.instructions);
+      console.log(`\n${header(i)}: ${size} bytes, signers ${signers.join(", ")}`);
+      console.log(
+        `  simulation: not run yet; it needs the accounts tx ${i}/${txs.length} creates. ` +
+          "The RPC simulates it (preflight) when it is sent, after the earlier transactions confirm.",
+      );
+      continue;
+    }
     const sim = await simulateTx(ctx.connection, ctx.payer, tx);
     console.log(`\n${header(i)}: ${sim.size} bytes, signers ${signers.join(", ")}`);
     for (const line of sim.logs) console.log(`  | ${line}`);
