@@ -10,6 +10,7 @@ import { createLatest } from "../lib/latest";
 import { signerId } from "../lib/session";
 import { errMsg, Short } from "./ui";
 import { ValueLine } from "./Holdings";
+import { NftThumb } from "./NftCard";
 import { loadValuation, type Valuation } from "../lib/value";
 
 /** Identity a fund list was loaded under: network generation, RPC and wallet. */
@@ -94,7 +95,10 @@ export function MyFunds({ s }: { s: AppState }) {
   );
 }
 
-/** One fund: the NFT's stored name and symbol (read from chain; the uri is shown, never fetched) and what it buys. */
+/**
+ * One fund: the NFT's picture (auto-fetched only from X1 Inscriptions hosts,
+ * see lib/nft_picture.ts), its stored name and symbol, value, and what it buys.
+ */
 function FundItem({ s, f, rev }: { s: AppState; f: HeldFund; rev: number }) {
   const net = s.net;
   const [md, setMd] = useState<{ key: string; stored: StoredMetadata | undefined } | null>(null);
@@ -119,27 +123,30 @@ function FundItem({ s, f, rev }: { s: AppState; f: HeldFund; rev: number }) {
     .map((t) => `${labels[t.mint.toBase58()]?.symbol ?? "?"} ${bpsToPercent(t.bps)}%`);
   const cash = f.account.targets.find((t) => t.mint.equals(f.account.quoteMint));
   return (
-    <li data-testid="fund-item">
-      <FundValue s={s} f={f} quoteSymbol={q} rev={rev} />
-      <div>
-        <strong data-testid="fund-name">{stored ? `${stored.name} (${stored.symbol})` : "Unnamed fund"}</strong>{" "}
-        <span className="small">
-          pays with {q}, buys {buys.join(", ") || "nothing"}
-          {cash ? `, keeps ${bpsToPercent(cash.bps)}% as cash` : ""}
+    <li data-testid="fund-item" className="fund-item">
+      <NftThumb uri={stored?.uri} name={stored?.name || "Unnamed fund"} pictureKey={`${key}|${f.fund.toBase58()}`} />
+      <div className="fund-item-body">
+        <FundValue s={s} f={f} quoteSymbol={q} rev={rev} />
+        <div>
+          <strong data-testid="fund-name">{stored ? `${stored.name} (${stored.symbol})` : "Unnamed fund"}</strong>{" "}
+          <span className="small">
+            pays with {q}, buys {buys.join(", ") || "nothing"}
+            {cash ? `, keeps ${bpsToPercent(cash.bps)}% as cash` : ""}
+          </span>
+        </div>
+        {stored && (
+          <div className="small muted">
+            metadata <span className="mono" data-testid="fund-uri">{stored.uri}</span>
+          </div>
+        )}
+        <button className="link mono" disabled={s.sendPending} onClick={() => s.go({ name: "fund", fund: f.fund.toBase58() })} data-testid="fund-link">
+          {f.fund.toBase58()}
+        </button>
+        <span className="small muted">
+          {" "}
+          NFT <Short value={f.nftMint.toBase58()} />
         </span>
       </div>
-      {stored && (
-        <div className="small muted">
-          metadata <span className="mono" data-testid="fund-uri">{stored.uri}</span>
-        </div>
-      )}
-      <button className="link mono" disabled={s.sendPending} onClick={() => s.go({ name: "fund", fund: f.fund.toBase58() })} data-testid="fund-link">
-        {f.fund.toBase58()}
-      </button>
-      <span className="small muted">
-        {" "}
-        NFT <Short value={f.nftMint.toBase58()} />
-      </span>
     </li>
   );
 }

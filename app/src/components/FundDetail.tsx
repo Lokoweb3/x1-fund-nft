@@ -15,6 +15,7 @@ import { useTokenLabels } from "../lib/lookups";
 import { bpsToPercent, countdown, humanInterval } from "../lib/wizard";
 import { ArtStep, type ArtResult } from "./ArtStep";
 import { HoldingsCard, useValuation } from "./Holdings";
+import { NftCard } from "./NftCard";
 
 /** Light polling: at most every 30 s, only while the tab is visible. */
 const POLL_MS = 30_000;
@@ -141,7 +142,10 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
         {error && <p className="error">{error}</p>}
         {view && (
           <>
-            <HoldingsCard state={valuation} view={view} labels={labels} />
+            <div className="fund-hero">
+              {net && <NftCard net={net} view={view} sendTick={s.sendTick} holdings={valuation} labels={labels} />}
+              <HoldingsCard state={valuation} view={view} labels={labels} />
+            </div>
             <FundSummary view={view} labels={labels} />
             <dl className="kv">
               <div>
