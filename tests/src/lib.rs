@@ -7,6 +7,21 @@
 //! change: the mint authority is overwritten to the test payer so the test can
 //! mint itself USDC.X. The transfer-fee extension bytes are left untouched.
 //! USDC.X has no transfer fee. TEST keeps its real 5% fee.
+//!
+//! The validator also clones X1 mainnet's Tokenkeg, Token-2022, and ATA
+//! programs. `FUND_NFT_FEATURES` picks the feature set:
+//!
+//! - unset or `x1` (default): Agave defaults, with `--deactivate-feature` for
+//!   every feature X1 mainnet reports inactive, read from X1 RPC at test
+//!   time, except `X1_SYSVAR_SYSCALL_EXCEPTION` (see its comment).
+//! - `clone`: plain `--clone-feature-set`. Known to fail: X1's own Tokenkeg
+//!   imports `sol_get_sysvar`, which Agave 4.1.2 does not register while
+//!   SIMD-0127 is inactive, so the first Tokenkeg call fails with
+//!   "unsupported BPF instruction".
+//! - `agave`: Agave 4.1.2 defaults.
+//!
+//! The program must be built with `anchor build --ignore-keys --arch v0`;
+//! X1 has SBPF v1 and v3 deployment inactive.
 
 use std::fs;
 use std::io::Read;
@@ -39,6 +54,18 @@ const OBS: &str = "6EV7aqfYx15yVPdBANkaEBdLpKUkyQrC6thUAy5CCi4y";
 const VAULT_0: &str = "E52PrH4XT4fTdPZMPXwtwigdQv9C2yQF8stm2EReUbHL";
 const VAULT_1: &str = "Hyvb75SAvMof44331mgAhpAT59jxP2DVe9fTFXXLUoRp";
 const AUTHORITY: &str = "9Dpjw2pB5kXJr6ZTHiqzEMfJPic3om9jgNacnwpLCoaU";
+const CLASSIC_TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+const ATA_PROGRAM: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+/// SIMD-0127, "Enable syscall for fetching Sysvar bytes". X1 mainnet's feature
+/// account reports it inactive, yet X1's own Tokenkeg (upgradeable, last
+/// deployed in slot 85798112) imports `sol_get_sysvar` and its transactions
+/// succeed on X1 mainnet. Agave 4.1.2 with this feature inactive does not
+/// register the syscall, so that Tokenkeg fails with "unsupported BPF
+/// instruction". The x1 feature mode therefore leaves this one feature
+/// active. The test asserts fund_nft.so does not import `sol_get_sysvar`, so
+/// the exception cannot hide a problem in this program.
+const X1_SYSVAR_SYSCALL_EXCEPTION: &str = "CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq";
 
 struct Validator(Child, PathBuf);
 
@@ -69,8 +96,20 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
     let so = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/deploy/fund_nft.so");
     assert!(
         so.exists(),
-        "run `anchor build` first; missing {}",
+        "run `anchor build --ignore-keys --arch v0` first; missing {}",
         so.display()
+    );
+    let so_bytes = fs::read(&so).unwrap();
+    // The x1 feature mode keeps SIMD-0127 active for X1's Tokenkeg. Our own
+    // program must not rely on that exception.
+    assert!(
+        !imports_symbol(&so_bytes, "sol_get_sysvar"),
+        "fund_nft.so imports sol_get_sysvar, which X1 mainnet reports inactive (SIMD-0127)"
+    );
+    assert_eq!(
+        u32::from_le_bytes(so_bytes[0x30..0x34].try_into().unwrap()),
+        0,
+        "fund_nft.so is not SBPF v0 (e_flags != 0); build with --arch v0"
     );
 
     let validator_bin = solana_bin("solana-test-validator");
@@ -88,8 +127,39 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
         .arg(PROGRAM_ID.to_string())
         .arg(&so)
         .arg("--url")
-        .arg(RPC)
+        .arg(RPC);
+    match std::env::var("FUND_NFT_FEATURES").as_deref() {
+        Err(_) | Ok("x1") => {
+            let inactive = x1_inactive_features();
+            println!(
+                "feature mode x1: deactivating {} X1-inactive features, keeping {X1_SYSVAR_SYSCALL_EXCEPTION} active",
+                inactive.len() - 1
+            );
+            for feature in inactive {
+                if feature != X1_SYSVAR_SYSCALL_EXCEPTION {
+                    cmd.arg("--deactivate-feature").arg(feature);
+                }
+            }
+        }
+        Ok("clone") => {
+            println!("feature mode clone: --clone-feature-set (known to fail, see module docs)");
+            cmd.arg("--clone-feature-set");
+        }
+        Ok("agave") => println!("feature mode agave: Agave defaults"),
+        Ok(other) => panic!("FUND_NFT_FEATURES must be x1, clone, or agave, not {other}"),
+    }
+    // Use the token programs X1 mainnet actually runs. The validator's
+    // bundled Tokenkeg fails under X1's feature set with "unsupported BPF
+    // instruction". On X1 mainnet (checked 2026-11-11) Tokenkeg and
+    // Token-2022 are owned by BPFLoaderUpgradeab1e, and the ATA program by
+    // BPFLoader2, so it is a plain account clone.
+    cmd.arg("--clone-upgradeable-program")
+        .arg(CLASSIC_TOKEN)
         .arg("--clone-upgradeable-program")
+        .arg(TOKEN_2022)
+        .arg("--clone")
+        .arg(ATA_PROGRAM);
+    cmd.arg("--clone-upgradeable-program")
         .arg(XDEX)
         .arg("--account")
         .arg(USDC)
@@ -145,38 +215,112 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
         .expect("mint test usdc");
     assert_eq!(token_amount(&account_data(&rpc, &payer_usdc)), 2_000_000);
 
-    let obs = account_data(&rpc, &pubkey(OBS));
-    let view = xdex::read_observation(&obs).expect("cloned observation");
-    assert_eq!(view.pool_id, pubkey(POOL));
-    let window = choose_window(view.ring, view.index).unwrap_or_else(|| {
+    let payer_test = ata(&payer.pubkey(), &test_mint, &token_2022);
+    program
+        .request()
+        .instruction(to_ix(create_associated_token_account_idempotent(
+            &payer.pubkey(),
+            &payer.pubkey(),
+            &test_mint,
+            &token_2022,
+        )))
+        .send()
+        .expect("payer test ata");
+
+    // The TWAP must be fresh relative to the validator clock (which follows
+    // wall clock), so the window depends on how old the cloned history is.
+    // Try the cloned ring first. If no legal window fits, one small direct
+    // swap writes a fresh observation (the pool writes one when the last is
+    // at least 15 s old) and the choice is retried.
+    let mut window = None;
+    for attempt in 0..2 {
+        let obs = account_data(&rpc, &pubkey(OBS));
+        let view = xdex::read_observation(&obs).expect("cloned observation");
+        assert_eq!(view.pool_id, pubkey(POOL));
+        let now = clock_unix_timestamp(&rpc);
+        let newest = observation_timestamp(view.ring, view.index);
+        window = choose_window(view.ring, view.index, now);
+        println!(
+            "window probe {attempt}: validator now {now}, newest observation {newest} (age {} s), window {window:?}",
+            now - newest as i64
+        );
+        if window.is_some() || attempt == 1 {
+            break;
+        }
+        program
+            .request()
+            .instruction(direct_swap(
+                &payer.pubkey(),
+                &payer_usdc,
+                &payer_test,
+                1_000,
+                1,
+            ))
+            .send()
+            .expect("swap to write a fresh observation");
+    }
+    let window = window.unwrap_or_else(|| {
         panic!(
-            "cloned observation history cannot satisfy any TWAP window tried (3600, 900, 120). newest index {}. {}",
-            view.index,
+            "no TWAP window in {WINDOWS:?} fits the observation history, even after a fresh swap. {}",
             log_tail(&log_path)
         )
     });
 
+    // Parameter bounds are enforced on chain: max_dev_bps 501 is rejected.
+    let loose_nft = Keypair::new();
+    let (loose_fund, _) =
+        Pubkey::find_program_address(&[b"fund", loose_nft.pubkey().as_ref()], &PROGRAM_ID);
+    let loose = program
+        .request()
+        .accounts(fund_nft::accounts::CreateFund {
+            creator: payer.pubkey(),
+            fund: loose_fund,
+            nft_mint: loose_nft.pubkey(),
+            creator_nft_account: ata(&payer.pubkey(), &loose_nft.pubkey(), &classic),
+            quote_mint: usdc,
+            token_program: classic,
+            associated_token_program: spl_associated_token_account_interface::program::ID,
+            system_program: System::id(),
+        })
+        .accounts(AccountMeta::new_readonly(test_mint, false))
+        .args(fund_nft::instruction::CreateFund {
+            params: fund_params(usdc, test_mint, window, 501),
+        })
+        .signer(&loose_nft)
+        .send();
+    expect_fund_error(loose, fund_nft::FundError::BadDeviation, "max_dev_bps 501");
+
+    // The non-cash target mint must be passed as a remaining account.
+    let bare_nft = Keypair::new();
+    let (bare_fund, _) =
+        Pubkey::find_program_address(&[b"fund", bare_nft.pubkey().as_ref()], &PROGRAM_ID);
+    let bare = program
+        .request()
+        .accounts(fund_nft::accounts::CreateFund {
+            creator: payer.pubkey(),
+            fund: bare_fund,
+            nft_mint: bare_nft.pubkey(),
+            creator_nft_account: ata(&payer.pubkey(), &bare_nft.pubkey(), &classic),
+            quote_mint: usdc,
+            token_program: classic,
+            associated_token_program: spl_associated_token_account_interface::program::ID,
+            system_program: System::id(),
+        })
+        .args(fund_nft::instruction::CreateFund {
+            params: fund_params(usdc, test_mint, window, 500),
+        })
+        .signer(&bare_nft)
+        .send();
+    expect_fund_error(
+        bare,
+        fund_nft::FundError::TargetMintAccounts,
+        "missing target mint account",
+    );
+
     let (fund, _) =
         Pubkey::find_program_address(&[b"fund", nft_mint.pubkey().as_ref()], &PROGRAM_ID);
     let creator_nft = ata(&payer.pubkey(), &nft_mint.pubkey(), &classic);
-    let params = CreateFundParams {
-        per_run_quote: 500_000,
-        interval_secs: 60,
-        twap_window_secs: window,
-        max_dev_bps: 500,
-        targets: vec![
-            TargetParams {
-                mint: usdc,
-                pool: Pubkey::default(),
-                bps: 2_000,
-            },
-            TargetParams {
-                mint: test_mint,
-                pool: pubkey(POOL),
-                bps: 8_000,
-            },
-        ],
-    };
+    let params = fund_params(usdc, test_mint, window, 500);
     program
         .request()
         .accounts(fund_nft::accounts::CreateFund {
@@ -242,32 +386,47 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
     assert_eq!(stored.targets[0].budget, 200_000);
     assert_eq!(stored.targets[1].budget, 800_000);
 
+    let dca_accounts = |pool_program: Pubkey| fund_nft::accounts::ExecuteDca {
+        caller: payer.pubkey(),
+        fund,
+        quote_mint: usdc,
+        target_mint: test_mint,
+        quote_vault,
+        target_vault,
+        caller_quote_account: payer_usdc,
+        quote_token_program: token_2022,
+        target_token_program: token_2022,
+        pool_program,
+        pool_state: pubkey(POOL),
+        amm_config: pubkey(AMM),
+        authority: pubkey(AUTHORITY),
+        pool_input_vault: pubkey(VAULT_0),
+        pool_output_vault: pubkey(VAULT_1),
+        pool_input_mint: usdc,
+        pool_output_mint: test_mint,
+        pool_input_token_program: token_2022,
+        pool_output_token_program: token_2022,
+        observation_state: pubkey(OBS),
+    };
+    // Any program other than the allowlisted XDEX id is refused, even an
+    // executable one. Token-2022 stands in for an attacker's program.
+    let wrong_program = program
+        .request()
+        .instruction(compute_limit(1_400_000))
+        .accounts(dca_accounts(token_2022))
+        .args(fund_nft::instruction::ExecuteDca { target_index: 1 })
+        .send();
+    expect_fund_error(
+        wrong_program,
+        fund_nft::FundError::BadPoolProgram,
+        "wrong pool_program",
+    );
+
     let pool_out_before = token_amount(&account_data(&rpc, &pubkey(VAULT_1)));
     let exec = program
         .request()
         .instruction(compute_limit(1_400_000))
-        .accounts(fund_nft::accounts::ExecuteDca {
-            caller: payer.pubkey(),
-            fund,
-            quote_mint: usdc,
-            target_mint: test_mint,
-            quote_vault,
-            target_vault,
-            caller_quote_account: payer_usdc,
-            quote_token_program: token_2022,
-            target_token_program: token_2022,
-            pool_program: pubkey(XDEX),
-            pool_state: pubkey(POOL),
-            amm_config: pubkey(AMM),
-            authority: pubkey(AUTHORITY),
-            pool_input_vault: pubkey(VAULT_0),
-            pool_output_vault: pubkey(VAULT_1),
-            pool_input_mint: usdc,
-            pool_output_mint: test_mint,
-            pool_input_token_program: token_2022,
-            pool_output_token_program: token_2022,
-            observation_state: pubkey(OBS),
-        })
+        .accounts(dca_accounts(pubkey(XDEX)))
         .args(fund_nft::instruction::ExecuteDca { target_index: 1 })
         .send();
     let sig = match exec {
@@ -310,17 +469,6 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
     // program directly. First confirm the reserve formula on a fresh quote,
     // then submit the same-sized swap with min-out one unit above the
     // post-fee amount and still far below the pre-fee amount.
-    let payer_test = ata(&payer.pubkey(), &test_mint, &token_2022);
-    program
-        .request()
-        .instruction(to_ix(create_associated_token_account_idempotent(
-            &payer.pubkey(),
-            &payer.pubkey(),
-            &test_mint,
-            &token_2022,
-        )))
-        .send()
-        .expect("payer test ata");
     let probe_in = 20_000u64;
     let (predicted_gross, predicted_recv) =
         quote_pool_swap(&account_data(&rpc, &pubkey(POOL)), &rpc, probe_in);
@@ -453,30 +601,84 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
     drop(validator);
 }
 
-fn choose_window(ring: &[u8], index: u16) -> Option<u32> {
-    for window in [3_600u32, 900, 120, 60] {
-        let quote = fund_nft::twap::quote_min_out(QuoteInput {
-            ring,
-            observation_index: index,
-            now: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
-            twap_window_secs: window,
-            amount_in_after_input_fee: 399_600,
-            trade_fee_rate: 2_800,
-            direction: SwapDirection::Token0ToToken1,
-            output_transfer_fee: TransferFee {
-                basis_points: 500,
-                maximum_fee: u64::MAX,
+/// Legal windows (900..=86_400) tried in order, shortest first.
+const WINDOWS: [u32; 7] = [900, 3_600, 7_200, 14_400, 21_600, 43_200, 86_400];
+
+/// First window the program's own quote accepts now and still accepts two
+/// minutes later, so the create/deposit/execute round trip cannot age it out.
+fn choose_window(ring: &[u8], index: u16, now: i64) -> Option<u32> {
+    WINDOWS.into_iter().find(|window| {
+        [now, now + 120].into_iter().all(|at| {
+            fund_nft::twap::quote_min_out(QuoteInput {
+                ring,
+                observation_index: index,
+                now: at,
+                twap_window_secs: *window,
+                amount_in_after_input_fee: 399_600,
+                trade_fee_rate: 2_800,
+                direction: SwapDirection::Token0ToToken1,
+                output_transfer_fee: TransferFee {
+                    basis_points: 500,
+                    maximum_fee: u64::MAX,
+                },
+                max_dev_bps: 500,
+            })
+            .is_ok_and(|quote| quote.min_out > 0)
+        })
+    })
+}
+
+fn observation_timestamp(ring: &[u8], index: u16) -> u64 {
+    let start = usize::from(index) * fund_nft::twap::OBSERVATION_BYTES;
+    u64::from_le_bytes(ring[start..start + 8].try_into().unwrap())
+}
+
+/// `Clock::unix_timestamp` as the validator sees it (sysvar byte 32).
+fn clock_unix_timestamp(rpc: &solana_client::rpc_client::RpcClient) -> i64 {
+    let data = account_data(rpc, &pubkey("SysvarC1ock11111111111111111111111111111111"));
+    i64::from_le_bytes(data[32..40].try_into().unwrap())
+}
+
+fn fund_params(usdc: Pubkey, test_mint: Pubkey, window: u32, max_dev_bps: u16) -> CreateFundParams {
+    CreateFundParams {
+        per_run_quote: 500_000,
+        interval_secs: 60,
+        twap_window_secs: window,
+        max_dev_bps,
+        targets: vec![
+            TargetParams {
+                mint: usdc,
+                pool: Pubkey::default(),
+                bps: 2_000,
             },
-            max_dev_bps: 500,
-        });
-        if quote.is_ok() {
-            return Some(window);
-        }
+            TargetParams {
+                mint: test_mint,
+                pool: pubkey(POOL),
+                bps: 8_000,
+            },
+        ],
     }
-    None
+}
+
+/// The transaction must fail with this program error. The client error
+/// carries the simulation logs, which name the Anchor error and its code.
+fn expect_fund_error<T: std::fmt::Debug, E: std::fmt::Debug>(
+    result: Result<T, E>,
+    expected: fund_nft::FundError,
+    what: &str,
+) {
+    let code = u32::from(expected);
+    let name = format!("{expected:?}");
+    let err = match result {
+        Ok(ok) => panic!("{what}: expected {name} ({code}), got success {ok:?}"),
+        Err(err) => format!("{err:?}"),
+    };
+    assert!(
+        err.contains(&format!("Error Code: {name}"))
+            || err.contains(&format!("Custom({code})"))
+            || err.contains(&format!("0x{code:x}")),
+        "{what}: expected {name} ({code}), got {err}"
+    );
 }
 
 fn min_out_from_chain(
@@ -661,6 +863,55 @@ fn override_mint_authority(path: &Path, authority: &Pubkey) {
     value["account"]["data"][0] =
         serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(&data));
     fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
+/// Every feature X1 mainnet does not report active, as known to the local
+/// Agave CLI, read from X1 RPC now so the list tracks X1.
+fn x1_inactive_features() -> Vec<String> {
+    let output = Command::new(solana_bin("solana"))
+        .args([
+            "feature",
+            "status",
+            "--display-all",
+            "--output",
+            "json",
+            "--url",
+            RPC,
+        ])
+        .output()
+        .unwrap_or_else(|err| panic!("solana feature status failed to start: {err}"));
+    assert!(
+        output.status.success(),
+        "solana feature status against {RPC} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("feature status json");
+    let features = value["features"].as_array().expect("features array");
+    let inactive: Vec<String> = features
+        .iter()
+        .filter(|feature| feature["status"].as_str() != Some("active"))
+        .map(|feature| feature["id"].as_str().expect("feature id").to_string())
+        .collect();
+    assert!(
+        features.len() > 100 && !inactive.is_empty(),
+        "unexpected feature status from {RPC}: {} features, {} inactive",
+        features.len(),
+        inactive.len()
+    );
+    assert!(
+        inactive.iter().any(|id| id == X1_SYSVAR_SYSCALL_EXCEPTION),
+        "X1 now reports {X1_SYSVAR_SYSCALL_EXCEPTION} active; drop the exception"
+    );
+    inactive
+}
+
+/// True when the ELF's symbol strings contain `name` as a whole entry.
+fn imports_symbol(elf: &[u8], name: &str) -> bool {
+    let mut needle = vec![0u8];
+    needle.extend_from_slice(name.as_bytes());
+    needle.push(0);
+    elf.windows(needle.len()).any(|window| window == needle.as_slice())
 }
 
 fn solana_bin(name: &str) -> PathBuf {
