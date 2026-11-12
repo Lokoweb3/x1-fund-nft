@@ -24,12 +24,22 @@ export function usePicture(uri: string | undefined, key: string): { picture: Pic
   useEffect(() => {
     if (uri === undefined) return;
     const ac = new AbortController();
+    // The blob: URL made for this run; revoked when the run is replaced or the component unmounts.
+    let objectUrl: string | undefined;
     setState({ key: runKey, picture: { status: "loading" } });
     resolvePicture(uri, hosts, ac.signal).then(
-      (picture) => !ac.signal.aborted && setState({ key: runKey, picture }),
+      (r) => {
+        if (ac.signal.aborted) return;
+        if (r.status !== "ok") return setState({ key: runKey, picture: r });
+        objectUrl = URL.createObjectURL(r.blob);
+        setState({ key: runKey, picture: { status: "ok", src: objectUrl, source: r.source, animationUrl: r.animationUrl } });
+      },
       () => !ac.signal.aborted && setState({ key: runKey, picture: { status: "error" } }),
     );
-    return () => ac.abort();
+    return () => {
+      ac.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runKey]);
   const picture: PictureState = uri === undefined ? { status: "none" } : state && state.key === runKey ? state.picture : { status: "loading" };
@@ -71,17 +81,16 @@ export function NftPicture({
   compact?: boolean;
 }) {
   const [failed, setFailed] = useState<string | null>(null);
-  if (picture.status === "ok" && failed !== picture.image) {
+  if (picture.status === "ok" && failed !== picture.src) {
+    // A local blob: URL of bytes fetched under lib/nft_picture.ts rules; the browser fetches nothing remote here.
     return (
       <img
         className="nft-img"
-        src={picture.image}
+        src={picture.src}
         alt={`Picture of ${name}`}
-        referrerPolicy="no-referrer"
-        crossOrigin="anonymous"
-        loading="lazy"
+        title={picture.source}
         decoding="async"
-        onError={() => setFailed(picture.image)}
+        onError={() => setFailed(picture.src)}
         data-testid="nft-image"
       />
     );
@@ -94,12 +103,28 @@ export function NftPicture({
       </span>
       {!compact && <span className="nft-ph-name">{name}</span>}
       {picture.status === "loading" && !compact && <span className="small">loading picture…</span>}
-      {picture.status === "ask" && (
-        <button type="button" className="nft-allow small" onClick={() => onAllow(picture.host)} data-testid="nft-load-picture">
-          {compact ? "Load picture" : `Load picture (contacts ${picture.host})`}
-        </button>
-      )}
+      {/* Compact thumbnails leave the consent button to PictureConsent, which names the host. */}
+      {picture.status === "ask" && !compact && <PictureConsent picture={picture} onAllow={onAllow} className="nft-allow small" />}
     </div>
+  );
+}
+
+/** The click that allows one host, always naming it. */
+export function PictureConsent({
+  picture,
+  onAllow,
+  className = "link small",
+}: {
+  picture: PictureState;
+  onAllow: (host: string) => void;
+  className?: string;
+}) {
+  if (picture.status !== "ask") return null;
+  const label = `Load picture (contacts ${picture.host})`;
+  return (
+    <button type="button" className={className} onClick={() => onAllow(picture.host)} title={label} aria-label={label} data-testid="nft-load-picture">
+      {label}
+    </button>
   );
 }
 
@@ -197,12 +222,11 @@ export function NftCard({
   return <NftCardView stored={md.stored} picture={md.loaded ? picture : { status: "loading" }} onAllow={allow} holdings={holdings} view={view} labels={labels} />;
 }
 
-/** Small picture for a fund list item. */
-export function NftThumb({ uri, name, pictureKey }: { uri: string | undefined; name: string; pictureKey: string }) {
-  const { picture, allow } = usePicture(uri, pictureKey);
+/** Small picture for a fund list item; its consent button is a separate PictureConsent in the item body. */
+export function NftThumb({ picture, name }: { picture: PictureState; name: string }) {
   return (
     <div className="nft-thumb" data-testid="nft-thumb">
-      <NftPicture picture={picture} name={name} onAllow={allow} compact />
+      <NftPicture picture={picture} name={name} onAllow={() => {}} compact />
     </div>
   );
 }

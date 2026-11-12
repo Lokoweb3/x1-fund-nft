@@ -10,7 +10,7 @@ import { createLatest } from "../lib/latest";
 import { signerId } from "../lib/session";
 import { errMsg, Short } from "./ui";
 import { ValueLine } from "./Holdings";
-import { NftThumb } from "./NftCard";
+import { NftThumb, PictureConsent, usePicture } from "./NftCard";
 import { loadValuation, type Valuation } from "../lib/value";
 
 /** Identity a fund list was loaded under: network generation, RPC and wallet. */
@@ -117,6 +117,7 @@ function FundItem({ s, f, rev }: { s: AppState; f: HeldFund; rev: number }) {
   }, [key]);
   const labels = useTokenLabels(net, [f.account.quoteMint, ...f.account.targets.map((t) => t.mint)]);
   const stored = md && md.key === key ? md.stored : undefined;
+  const { picture, allow } = usePicture(stored?.uri, `${key}|${f.fund.toBase58()}`);
   const q = labels[f.account.quoteMint.toBase58()]?.symbol ?? "?";
   const buys = f.account.targets
     .filter((t) => !t.mint.equals(f.account.quoteMint))
@@ -124,9 +125,10 @@ function FundItem({ s, f, rev }: { s: AppState; f: HeldFund; rev: number }) {
   const cash = f.account.targets.find((t) => t.mint.equals(f.account.quoteMint));
   return (
     <li data-testid="fund-item" className="fund-item">
-      <NftThumb uri={stored?.uri} name={stored?.name || "Unnamed fund"} pictureKey={`${key}|${f.fund.toBase58()}`} />
+      <NftThumb picture={picture} name={stored?.name || "Unnamed fund"} />
       <div className="fund-item-body">
         <FundValue s={s} f={f} quoteSymbol={q} rev={rev} />
+        <PictureConsent picture={picture} onAllow={allow} />
         <div>
           <strong data-testid="fund-name">{stored ? `${stored.name} (${stored.symbol})` : "Unnamed fund"}</strong>{" "}
           <span className="small">

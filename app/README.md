@@ -15,9 +15,9 @@ The dev server (`npm run dev`) and the preview server (`npm run build && npm run
 | the RPC you pick | always (reads, simulations, sends). Mint names, pools, inscription accounts and metadata are all read from it |
 | the explorer (`explorer.x1.xyz`, `explorer.testnet.x1.xyz`, or your template) | only when you click a signature link |
 | `www.x1inscriptions.io` and `<n>.x1ins.xyz` | only after you press **Check** on an inscription in the NFT image step: the site's NFT JSON (`/api/nft/ins/<n>.json`), a HEAD of `https://<n>.x1ins.xyz/content/<n>`, then the card image and video previews; and, to show a fund NFT's picture (fund page card, My funds thumbnail), its metadata uri and image when both are https on these hosts |
-| any other host in a fund NFT's metadata uri or image | only after you click **Load picture (contacts &lt;host&gt;)**, for that page view |
+| any other host in a fund NFT's metadata uri or image | only after you click **Load picture (contacts &lt;host&gt;)**, which always names that host (also in the My funds list), for that page view |
 
-Nothing else. Plain image/video links you type are never loaded; the app shows them as links you can open yourself. Picture requests carry no cookies or referrer, time out after 8 s, and the metadata JSON is capped at 64 KB; the image is only shown as an `<img>`, and an `animation_url` is only a link. Playwright fails a run if the page requests any other host (see Tests).
+Nothing else. Plain image/video links you type are never loaded; the app shows them as links you can open yourself. A fund NFT's picture is fetched by the app itself, never by the browser from a remote `<img src>`: the metadata JSON and the image bytes are each one GET with no cookies or credentials (`credentials: "omit"`), no referrer, redirects refused (a redirect is an error, never followed to another host), an 8 s timeout, and a size cap enforced while reading (64 KB JSON, 2 MB image). The image must be a raster `image/*` type (SVG is refused) and is shown from a local `blob:` URL that is revoked when the card changes or closes. An `animation_url` is only a link. Anything else shows a generated placeholder. Playwright fails a run if the page requests any other host (see Tests).
 
 ## Wallet
 
@@ -149,6 +149,10 @@ npm test                              # unit tests: test wallet refusal, RPC/exp
                                       # schedules, projections, labels, friendly errors, review
                                       # sentences, the image step's options (mock RPCs;
                                       # tsconfig.test.json resolves the shared core to app/node_modules)
+
+# Picture fetch in a real Chromium, loopback only (no validator): an approved
+# host's redirect is not followed and the redirect target sees no request.
+PLAYWRIGHT_BROWSERS_PATH=/abs/scratch/pw-browsers npm run test:browser
 
 # Browser smoke + e2e (Playwright 1.56.1, chromium). It starts
 # scripts/local-validator.sh on port 18799 and the dev server on 5179 itself.

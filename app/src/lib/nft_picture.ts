@@ -6,12 +6,16 @@
  * exception is the X1 Inscriptions hosts (www.x1inscriptions.io and
  * <n>.x1ins.xyz over https), where the app's own inscriptions live; any
  * other host is contacted only after the user clicks "Load picture" for it.
- * Requests carry no credentials and no referrer, time out, and the JSON is
- * size-capped and parsed defensively. The image is only ever used as an
- * <img src>; `animation_url` is offered as a link, never embedded.
+ * Both the JSON and the image bytes are fetched here with no credentials,
+ * no referrer, redirects refused, an 8 s timeout and a size cap (64 KB
+ * JSON, 2 MB image); the JSON is parsed defensively and the image must be
+ * a raster image/* type. The page shows the image from a local blob: URL,
+ * so the browser itself never requests a remote picture. `animation_url`
+ * is offered as a link, never embedded.
  */
 
 export const NFT_JSON_MAX_BYTES = 64 * 1024;
+export const NFT_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
 export const NFT_FETCH_TIMEOUT_MS = 8_000;
 
 /** The URL if it parses as http(s), else undefined. */
@@ -63,11 +67,23 @@ export function parseNftJson(text: string): NftJson {
   return { image: image.href, animationUrl: httpUrl(o.animation_url)?.href };
 }
 
-/** Read a response body as text, stopping past `max` bytes. */
-async function readCapped(res: Response, max: number): Promise<string> {
+/** Stop reading a response we are rejecting, so the connection is released. */
+function discard(res: Response): void {
+  try {
+    void res.body?.cancel().catch(() => {});
+  } catch {
+    // already locked or consumed
+  }
+}
+
+/** Read a response body, stopping (and cancelling it) past `max` bytes. */
+export async function readCapped(res: Response, max: number, what: string): Promise<Uint8Array> {
   const len = Number(res.headers.get("content-length") ?? "");
-  if (Number.isFinite(len) && len > max) throw new Error("metadata JSON is too large");
-  if (!res.body) return res.text();
+  if (Number.isFinite(len) && len > max) {
+    discard(res);
+    throw new Error(`${what} is too large`);
+  }
+  if (!res.body) return new Uint8Array(await res.arrayBuffer());
   const reader = res.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -76,8 +92,8 @@ async function readCapped(res: Response, max: number): Promise<string> {
     if (done) break;
     total += value.byteLength;
     if (total > max) {
-      void reader.cancel();
-      throw new Error("metadata JSON is too large");
+      void reader.cancel().catch(() => {});
+      throw new Error(`${what} is too large`);
     }
     chunks.push(value);
   }
@@ -87,19 +103,24 @@ async function readCapped(res: Response, max: number): Promise<string> {
     all.set(c, o);
     o += c.byteLength;
   }
-  return new TextDecoder().decode(all);
+  return all;
 }
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
-/** Fetch and parse the metadata JSON with no credentials, no referrer, a timeout and a size cap. */
-export async function fetchNftJson(uri: string, signal: AbortSignal, fetchFn: FetchLike = fetch): Promise<NftJson> {
+/**
+ * GET with no credentials, no referrer, CORS mode, redirects refused (a
+ * redirect could lead to a host nobody approved) and a timeout covering
+ * the whole body read inside `use`.
+ */
+async function hardenedGet<T>(url: string, signal: AbortSignal, fetchFn: FetchLike, use: (res: Response) => Promise<T>): Promise<T> {
   const timeout = new AbortController();
   const timer = setTimeout(() => timeout.abort(), NFT_FETCH_TIMEOUT_MS);
   const onAbort = () => timeout.abort();
+  if (signal.aborted) timeout.abort();
   signal.addEventListener("abort", onAbort);
   try {
-    const res = await fetchFn(uri, {
+    const res = await fetchFn(url, {
       method: "GET",
       credentials: "omit",
       referrerPolicy: "no-referrer",
@@ -108,31 +129,75 @@ export async function fetchNftJson(uri: string, signal: AbortSignal, fetchFn: Fe
       redirect: "error",
       signal: timeout.signal,
     });
-    if (!res.ok) throw new Error(`metadata request failed (${res.status})`);
-    return parseNftJson(await readCapped(res, NFT_JSON_MAX_BYTES));
+    if (res.type === "opaqueredirect" || res.redirected) {
+      discard(res);
+      throw new Error("redirects are not followed");
+    }
+    if (!res.ok) {
+      discard(res);
+      throw new Error(`request failed (${res.status})`);
+    }
+    return await use(res);
   } finally {
     clearTimeout(timer);
     signal.removeEventListener("abort", onAbort);
   }
 }
 
+/** Fetch and parse the metadata JSON (hardened GET, 64 KB cap). */
+export async function fetchNftJson(uri: string, signal: AbortSignal, fetchFn: FetchLike = fetch): Promise<NftJson> {
+  return hardenedGet(uri, signal, fetchFn, async (res) =>
+    parseNftJson(new TextDecoder().decode(await readCapped(res, NFT_JSON_MAX_BYTES, "metadata JSON"))),
+  );
+}
+
+/**
+ * Raster image types only. SVG is refused: even though <img> does not run
+ * its scripts, there is no need to accept a document format here.
+ */
+export function checkImageType(contentType: string | null): string {
+  const t = (contentType ?? "").split(";")[0]!.trim().toLowerCase();
+  if (!/^image\/[a-z0-9.+-]+$/.test(t) || t === "image/svg+xml") throw new Error(`not a raster image (${t || "no content type"})`);
+  return t;
+}
+
+/** Fetch the picture's bytes (hardened GET, image/* except SVG, 2 MB cap) as a Blob. */
+export async function fetchImageBlob(url: string, signal: AbortSignal, fetchFn: FetchLike = fetch): Promise<Blob> {
+  return hardenedGet(url, signal, fetchFn, async (res) => {
+    let type: string;
+    try {
+      type = checkImageType(res.headers.get("content-type"));
+    } catch (err) {
+      discard(res);
+      throw err;
+    }
+    const bytes = await readCapped(res, NFT_IMAGE_MAX_BYTES, "picture");
+    return new Blob([bytes], { type });
+  });
+}
+
+/** What the card renders. `src` is a blob: URL the owner of the state revokes. */
 export type PictureState =
   | { status: "none" }
   | { status: "loading" }
   | { status: "ask"; host: string }
-  | { status: "ok"; image: string; animationUrl: string | undefined }
+  | { status: "ok"; src: string; source: string; animationUrl: string | undefined }
   | { status: "error" };
+
+export type ResolvedPicture = Exclude<PictureState, { status: "ok" } | { status: "loading" }> | { status: "ok"; blob: Blob; source: string; animationUrl: string | undefined };
 
 /**
  * Resolve the picture for a metadata uri. Stops with "ask" naming the host
- * that needs a click, for the metadata JSON or for the image itself.
+ * that needs a click, for the metadata JSON or for the image itself. The
+ * image bytes are fetched here, under the same rules, so the browser never
+ * requests a remote image (or follows its redirects) on its own.
  */
 export async function resolvePicture(
   uri: string | undefined,
   allowed: ReadonlySet<string>,
   signal: AbortSignal,
   fetchFn?: FetchLike,
-): Promise<PictureState> {
+): Promise<ResolvedPicture> {
   const u = httpUrl(uri);
   if (!u) return { status: "none" };
   if (!mayFetch(u.href, allowed)) return { status: "ask", host: u.host };
@@ -143,5 +208,10 @@ export async function resolvePicture(
     return { status: "error" };
   }
   if (!mayFetch(json.image, allowed)) return { status: "ask", host: new URL(json.image).host };
-  return { status: "ok", image: json.image, animationUrl: json.animationUrl };
+  try {
+    const blob = await fetchImageBlob(json.image, signal, fetchFn);
+    return { status: "ok", blob, source: json.image, animationUrl: json.animationUrl };
+  } catch {
+    return { status: "error" };
+  }
 }
