@@ -209,6 +209,7 @@ pub fn handle_execute_dca(ctx: Context<ExecuteDca>, target_index: u8) -> Result<
         twap::quote_min_out(QuoteInput {
             ring: observation.ring,
             observation_index: observation.index,
+            now: clock.unix_timestamp,
             twap_window_secs,
             amount_in_after_input_fee: amount_after_input_fee,
             trade_fee_rate,

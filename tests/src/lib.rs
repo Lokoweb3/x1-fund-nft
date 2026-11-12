@@ -456,6 +456,10 @@ fn choose_window(ring: &[u8], index: u16) -> Option<u32> {
         let quote = fund_nft::twap::quote_min_out(QuoteInput {
             ring,
             observation_index: index,
+            now: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
             twap_window_secs: window,
             amount_in_after_input_fee: 399_600,
             trade_fee_rate: 2_800,

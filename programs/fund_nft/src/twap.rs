@@ -2,9 +2,17 @@
 //!
 //! The pool records two cumulative prices. `cumulative_token_0_price_x32` is
 //! raw token-1 units per raw token-0 unit, scaled by 2^32, and the token-1
-//! cumulative is the reciprocal side. One of those x32 values is often a tiny
-//! integer (about 83 on the USDC.X/TEST pool), so the quote always uses the
-//! larger side and inverts when that side points the other way.
+//! cumulative is the reciprocal side. The quote always uses the cumulative
+//! that prices the swap direction (output per input). Inverting the opposite
+//! side would give `1 / E[P]` instead of `E[output per input]`, which a short
+//! price spike can push far from the time average. When the directional x32
+//! average is below `MIN_DIRECT_PRICE_X32` the quote is rejected rather than
+//! inverted, so the relative truncation error stays at most 2^-16.
+//!
+//! The newest observation must be no older than the window and not in the
+//! future. The older sample is the latest at or before `now - window`, else
+//! the oldest, and the span between the two must be within
+//! `[window / 2, 2 * window]`.
 //!
 //! Cumulative values are allowed to wrap. Deltas use `wrapping_sub`.
 
@@ -19,6 +27,9 @@ pub const TRADE_FEE_DENOMINATOR: u128 = 1_000_000;
 pub const OBSERVATION_COUNT: usize = 100;
 pub const OBSERVATION_BYTES: usize = 40;
 pub const RING_BYTES: usize = OBSERVATION_COUNT * OBSERVATION_BYTES;
+/// Smallest directional x32 average the quote accepts. Below this, flooring
+/// the average loses more than 2^-16 of the price.
+pub const MIN_DIRECT_PRICE_X32: u128 = 1 << 16;
 
 /// Which pool mint is the swap input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,8 +75,8 @@ pub struct Quote {
     pub older_timestamp: u64,
     /// Seconds between the two observations actually used.
     pub dt_secs: u64,
-    /// The larger price was the opposite side, so the quote inverted it.
-    pub used_inverse: bool,
+    /// Directional x32 average used for the quote (output per input).
+    pub price_x32: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,10 +89,16 @@ pub enum TwapError {
     EmptyObservation,
     /// The two samples are closer together than `twap_window_secs / 2`.
     WindowTooShort,
+    /// The two samples are more than `2 * twap_window_secs` apart.
+    WindowTooLong,
+    /// The newest observation is older than `twap_window_secs` before `now`.
+    Stale,
+    /// The newest observation is later than `now`.
+    FutureObservation,
     /// A zero window cannot define an average.
     ZeroWindow,
-    /// The chosen price is zero, so the quote is undefined.
-    ZeroPrice,
+    /// The directional average is below `MIN_DIRECT_PRICE_X32`.
+    PriceTooSmall,
     /// A denominator was zero.
     ZeroDenominator,
     /// The quote does not fit in a token amount.
@@ -99,6 +116,8 @@ pub struct QuoteInput<'a> {
     /// `cumulative_token_1_price_x32: u128`, all little-endian.
     pub ring: &'a [u8],
     pub observation_index: u16,
+    /// `Clock::unix_timestamp` at execution.
+    pub now: i64,
     pub twap_window_secs: u32,
     /// Swap input after the input mint's transfer fee.
     pub amount_in_after_input_fee: u64,
@@ -155,37 +174,28 @@ pub fn quote_min_out(input: QuoteInput<'_>) -> Result<Quote, TwapError> {
         return Err(TwapError::ZeroWindow);
     }
 
-    let (newest, older, dt) =
-        select_samples(input.ring, input.observation_index, input.twap_window_secs)?;
-    let avg0 = newest
-        .cumulative_token_0_price_x32
-        .wrapping_sub(older.cumulative_token_0_price_x32)
-        / dt as u128;
-    let avg1 = newest
-        .cumulative_token_1_price_x32
-        .wrapping_sub(older.cumulative_token_1_price_x32)
-        / dt as u128;
-
-    let (direct, inverse) = match input.direction {
-        SwapDirection::Token0ToToken1 => (avg0, avg1),
-        SwapDirection::Token1ToToken0 => (avg1, avg0),
-    };
-    // Tie goes to the direct side so a balanced pair does not invert.
-    let (price, used_inverse) = if direct >= inverse {
-        (direct, false)
-    } else {
-        (inverse, true)
-    };
-    if price == 0 {
-        return Err(TwapError::ZeroPrice);
+    let (newest, older, dt) = select_samples(
+        input.ring,
+        input.observation_index,
+        input.twap_window_secs,
+        input.now,
+    )?;
+    // Token 0 -> token 1 needs token-1 per token-0, which is the token-0
+    // cumulative. The reverse direction uses the token-1 cumulative.
+    let price = match input.direction {
+        SwapDirection::Token0ToToken1 => newest
+            .cumulative_token_0_price_x32
+            .wrapping_sub(older.cumulative_token_0_price_x32),
+        SwapDirection::Token1ToToken0 => newest
+            .cumulative_token_1_price_x32
+            .wrapping_sub(older.cumulative_token_1_price_x32),
+    } / dt as u128;
+    if price < MIN_DIRECT_PRICE_X32 {
+        return Err(TwapError::PriceTooSmall);
     }
 
     let net = net_after_trade_fee(input.amount_in_after_input_fee, input.trade_fee_rate)?;
-    let before_output_fee = if used_inverse {
-        mul_div_floor(net, PRICE_SCALE, price)?
-    } else {
-        mul_div_floor(net, price, PRICE_SCALE)?
-    };
+    let before_output_fee = mul_div_floor(net, price, PRICE_SCALE)?;
     let before_output_fee = u64::try_from(before_output_fee).map_err(|_| TwapError::Overflow)?;
     let expected_out = amount_after_transfer_fee(before_output_fee, input.output_transfer_fee)?;
     let min_out = mul_div_floor(
@@ -201,7 +211,7 @@ pub fn quote_min_out(input: QuoteInput<'_>) -> Result<Quote, TwapError> {
         newest_timestamp: newest.block_timestamp,
         older_timestamp: older.block_timestamp,
         dt_secs: dt,
-        used_inverse,
+        price_x32: price,
     })
 }
 
@@ -209,6 +219,7 @@ fn select_samples(
     ring: &[u8],
     observation_index: u16,
     window_secs: u32,
+    now: i64,
 ) -> Result<(Observation, Observation, u64), TwapError> {
     if ring.len() != RING_BYTES {
         return Err(TwapError::BadRing);
@@ -221,7 +232,15 @@ fn select_samples(
     if newest.block_timestamp == 0 {
         return Err(TwapError::EmptyObservation);
     }
-    let cutoff = newest.block_timestamp.saturating_sub(window_secs as u64);
+    // A negative `now` is earlier than any non-zero timestamp.
+    let now = u64::try_from(now).map_err(|_| TwapError::FutureObservation)?;
+    if newest.block_timestamp > now {
+        return Err(TwapError::FutureObservation);
+    }
+    if now - newest.block_timestamp > window_secs as u64 {
+        return Err(TwapError::Stale);
+    }
+    let cutoff = now.saturating_sub(window_secs as u64);
 
     let mut older_i: Option<usize> = None;
     let mut oldest_i: Option<usize> = None;
@@ -255,6 +274,9 @@ fn select_samples(
     let min_span = (window_secs / 2) as u64;
     if dt == 0 || dt < min_span {
         return Err(TwapError::WindowTooShort);
+    }
+    if dt > 2 * window_secs as u64 {
+        return Err(TwapError::WindowTooLong);
     }
     Ok((newest, older, dt))
 }
@@ -385,9 +407,12 @@ mod tests {
     }
 
     fn no_fees(direction: SwapDirection, ring: &[u8], index: u16, amount: u64) -> QuoteInput<'_> {
+        // `now` defaults to the newest timestamp, the freshest legal clock.
+        let now = read_timestamp(ring, index as usize).unwrap() as i64;
         QuoteInput {
             ring,
             observation_index: index,
+            now,
             twap_window_secs: 1_000,
             amount_in_after_input_fee: amount,
             trade_fee_rate: 0,
@@ -440,7 +465,6 @@ mod tests {
         let plain_quote = quote_min_out(plain_input).unwrap();
         assert_eq!(wrapped_quote.min_out, plain_quote.min_out);
         assert_eq!(wrapped_quote.min_out, amount as u64 * 1_000);
-        assert!(!wrapped_quote.used_inverse);
     }
 
     #[test]
@@ -462,15 +486,23 @@ mod tests {
     }
 
     #[test]
-    fn sparse_history_uses_the_latest_sample_at_or_before_the_cutoff() {
+    fn sparse_history_is_rejected_when_the_span_exceeds_twice_the_window() {
+        // A 24h gap used to be accepted for a 1h window. It is now too long.
         let mut ring = empty_ring();
         put(&mut ring, 0, 1_000_000, 0, 0);
         put(&mut ring, 1, 1_086_400, 86_400 * PRICE_SCALE, 0);
         let mut input = no_fees(SwapDirection::Token0ToToken1, &ring, 1, 4);
         input.twap_window_secs = 3_600;
-        let quote = quote_min_out(input).unwrap();
-        assert_eq!(quote.older_timestamp, 1_000_000);
-        assert_eq!(quote.dt_secs, 86_400);
+        assert_eq!(quote_min_out(input).unwrap_err(), TwapError::WindowTooLong);
+
+        // Exactly 2 * window is still accepted.
+        let mut edge = empty_ring();
+        put(&mut edge, 0, 1_000_000, 0, 0);
+        put(&mut edge, 1, 1_007_200, 7_200 * PRICE_SCALE, 0);
+        let mut edge_input = no_fees(SwapDirection::Token0ToToken1, &edge, 1, 4);
+        edge_input.twap_window_secs = 3_600;
+        let quote = quote_min_out(edge_input).unwrap();
+        assert_eq!(quote.dt_secs, 7_200);
         assert_eq!(quote.min_out, 4);
 
         // Only ten seconds of history cannot satisfy a one-hour window / 2.
@@ -486,6 +518,90 @@ mod tests {
     }
 
     #[test]
+    fn newest_observation_must_be_fresh_and_not_in_the_future() {
+        let mut ring = empty_ring();
+        put(&mut ring, 0, 10_000, 0, 0);
+        put(&mut ring, 1, 11_000, 1_000 * PRICE_SCALE, 0);
+        let mut input = no_fees(SwapDirection::Token0ToToken1, &ring, 1, 10);
+        input.twap_window_secs = 1_000;
+
+        input.now = 12_000; // exactly one window old: accepted
+        let quote = quote_min_out(input).unwrap();
+        // The cutoff is now - window = 11_000, so the older sample must be at
+        // or before that. Only ts 10_000 qualifies besides the newest.
+        assert_eq!(quote.older_timestamp, 10_000);
+
+        input.now = 12_001;
+        assert_eq!(quote_min_out(input).unwrap_err(), TwapError::Stale);
+
+        input.now = 10_999;
+        assert_eq!(
+            quote_min_out(input).unwrap_err(),
+            TwapError::FutureObservation
+        );
+        input.now = -1;
+        assert_eq!(
+            quote_min_out(input).unwrap_err(),
+            TwapError::FutureObservation
+        );
+    }
+
+    #[test]
+    fn cutoff_is_measured_from_now_not_from_the_newest_sample() {
+        let mut ring = empty_ring();
+        put(&mut ring, 0, 8_000, 0, 0);
+        put(&mut ring, 1, 9_000, 1_000 * PRICE_SCALE, 0);
+        put(&mut ring, 2, 10_000, 2_000 * PRICE_SCALE, 0);
+        let mut input = no_fees(SwapDirection::Token0ToToken1, &ring, 2, 10);
+        input.twap_window_secs = 1_500;
+        // newest - window = 8_500 would pick 8_000. now - window = 9_000.
+        input.now = 10_500;
+        let quote = quote_min_out(input).unwrap();
+        assert_eq!(quote.older_timestamp, 9_000);
+        assert_eq!(quote.dt_secs, 1_000);
+    }
+
+    #[test]
+    fn reverse_direction_quotes_mean_of_inverse_price_not_inverse_of_mean() {
+        // Token-0 price P (token-1 per token-0) is 1 for 9_900 s, then 10_000
+        // for 100 s. Token-1's cumulative accrues 1/P over the same time.
+        let scale = PRICE_SCALE;
+        let inv_spike = scale / 10_000; // floor(2^32 / 10_000), as the pool would
+        let mut ring = empty_ring();
+        put(&mut ring, 0, 100_000, 0, 0);
+        put(&mut ring, 1, 109_900, 9_900 * scale, 9_900 * scale);
+        put(
+            &mut ring,
+            2,
+            110_000,
+            9_900 * scale + 100 * 10_000 * scale,
+            9_900 * scale + 100 * inv_spike,
+        );
+        let amount = 1_000_000u64;
+        let mut input = no_fees(SwapDirection::Token1ToToken0, &ring, 2, amount);
+        input.twap_window_secs = 10_000;
+        let quote = quote_min_out(input).unwrap();
+        assert_eq!(quote.dt_secs, 10_000);
+
+        // E[1/P] = (9_900 + 100 / 10_000) / 10_000 = 0.990001.
+        // 1 / E[P] = 10_000 / (9_900 + 1_000_000) = 0.0099020...
+        let e_inv_p = amount as f64 * 0.990001;
+        let inv_e_p = amount as f64 * 10_000.0 / 1_009_900.0;
+        let got = quote.min_out as f64;
+        assert!(
+            (got - e_inv_p).abs() <= 2.0,
+            "quote {got} should be E[1/P] * amount = {e_inv_p}"
+        );
+        assert!(got > 50.0 * inv_e_p, "quote must not be 1/E[P] = {inv_e_p}");
+
+        // The forward direction still prices with E[P] = 100.99. The x32
+        // average is floored, so 1_000 * 100.99 = 100_990 comes out one lower.
+        let mut forward = no_fees(SwapDirection::Token0ToToken1, &ring, 2, 1_000);
+        forward.twap_window_secs = 10_000;
+        assert_eq!(quote_min_out(forward).unwrap().min_out, 100_989);
+    }
+
+    #[test]
     fn single_observation_is_rejected() {
         let mut ring = empty_ring();
         put(&mut ring, 4, 9_000, PRICE_SCALE, 1);
@@ -494,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn precision_trap_uses_the_larger_side_in_both_directions() {
+    fn precision_trap_rejects_a_tiny_directional_average_instead_of_inverting() {
         // Token-0 price is 50_000_000 raw output per raw input, scaled by 2^32.
         // Token-1 price is 83. That is the same shape as USDC.X/TEST, where the
         // measured token-1 x32 average was ~83 and the token-0 side was ~2.2e17.
@@ -514,22 +630,25 @@ mod tests {
         let mut forward_input = no_fees(SwapDirection::Token0ToToken1, &ring, 1, 1_000_000);
         forward_input.twap_window_secs = 200;
         let forward = quote_min_out(forward_input).unwrap();
-        assert!(!forward.used_inverse);
+        assert_eq!(forward.price_x32, price0);
         assert_eq!(forward.min_out, 1_000_000 * 50_000_000);
 
-        // Naive use of the tiny side: amount * 83 / 2^32 == 0.
-        // One raw token-0 out. The 83-scaled side truncates this input to 0.
-        let backward_amount = 50_000_000u64;
-        assert_eq!(
-            (backward_amount as u128) * price1 / PRICE_SCALE,
-            0,
-            "the fixture must be one the tiny price cannot quote"
-        );
-        let mut backward_input = no_fees(SwapDirection::Token1ToToken0, &ring, 1, backward_amount);
+        // The reverse direction would need the 83-scaled side. It is below
+        // MIN_DIRECT_PRICE_X32, so the quote is rejected, not inverted.
+        let mut backward_input = no_fees(SwapDirection::Token1ToToken0, &ring, 1, 50_000_000);
         backward_input.twap_window_secs = 200;
-        let backward = quote_min_out(backward_input).unwrap();
-        assert!(backward.used_inverse);
-        assert_eq!(backward.min_out, 1);
+        assert_eq!(
+            quote_min_out(backward_input).unwrap_err(),
+            TwapError::PriceTooSmall
+        );
+
+        // At exactly the floor the quote is accepted.
+        let mut floor_ring = empty_ring();
+        put(&mut floor_ring, 0, 1_000, 0, 0);
+        put(&mut floor_ring, 1, 1_100, 0, MIN_DIRECT_PRICE_X32 * 100);
+        let mut floor_input = no_fees(SwapDirection::Token1ToToken0, &floor_ring, 1, 1 << 20);
+        floor_input.twap_window_secs = 200;
+        assert_eq!(quote_min_out(floor_input).unwrap().min_out, 16);
     }
 
     #[test]
@@ -541,6 +660,7 @@ mod tests {
         let quote = quote_min_out(QuoteInput {
             ring: &ring,
             observation_index: 1,
+            now: 1_100,
             twap_window_secs: 1_000,
             amount_in_after_input_fee: 1_000_000,
             trade_fee_rate: 2_800,
