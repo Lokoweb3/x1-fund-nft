@@ -303,7 +303,24 @@ export interface Plan {
 export interface TxOutcome {
   label: string;
   signature: string;
+  /** Last block height at which this transaction could land (from the blockhash it was signed with). */
+  lastValidBlockHeight: number;
+  /**
+   * The slot of the RPC response that confirmed it, when the RPC gave one. The
+   * transaction executed at or before this slot, so any account state read to
+   * plan a follow-up must come from a bank at least this new.
+   */
+  confirmedSlot?: number;
 }
+
+/**
+ * Called by sendPlan for a transaction it is about to broadcast: after every
+ * guard passed, synchronously, immediately before sendRawTransaction. A
+ * transaction that never reaches this point was never broadcast. A caller
+ * that must track every transaction that may land (an inscription upload)
+ * records it here, so the record does not depend on the send's result.
+ */
+export type SubmitHook = (tx: { index: number; label: string; signature: string; lastValidBlockHeight: number }) => void;
 
 export type FailedTxState = "not sent" | "unknown" | "failed";
 
@@ -315,7 +332,7 @@ export type FailedTxState = "not sent" | "unknown" | "failed";
  */
 export function partialFailureMessage(
   plan: Plan,
-  done: TxOutcome[],
+  done: ReadonlyArray<Pick<TxOutcome, "label" | "signature">>,
   failed: number,
   what: string,
   state: FailedTxState,
@@ -583,7 +600,7 @@ export interface SendConnection {
   confirmTransaction(
     strategy: { signature: string; blockhash: string; lastValidBlockHeight: number },
     commitment: "confirmed",
-  ): Promise<{ value: { err: unknown } }>;
+  ): Promise<{ context?: { slot: number }; value: { err: unknown } }>;
 }
 
 export function compileTx(payer: PublicKey, tx: PlannedTx, blockhash: string): VersionedTransaction {
@@ -633,10 +650,11 @@ export class PlanSendError extends Error {
     /** Signature of the failed transaction, when it was signed. */
     readonly signature: string | undefined,
     /**
-     * Last block height at which the failed transaction can still land, when
-     * it may have been submitted. A transaction whose status is unknown must
-     * not be retried or worked around until it is confirmed or this height
-     * has passed.
+     * Last block height at which the failed transaction can still land, set
+     * whenever it was submitted ("unknown" or "failed"; undefined only for
+     * "not sent"). A transaction whose status is unknown must not be retried
+     * or worked around until it is confirmed or this height has passed. Every
+     * confirmed transaction in `done` carries its own.
      */
     readonly lastValidBlockHeight?: number,
   ) {
@@ -663,6 +681,10 @@ export class PlanSendError extends Error {
  * "not sent" (nothing of it left this process); transactions already
  * submitted keep their honest status. The web app uses it to stop when the
  * network, signer or mainnet acknowledgement changed mid-send.
+ *
+ * `onSubmit`, when given, runs after the broadcast guard and immediately
+ * before each sendRawTransaction (see SubmitHook). If it throws, that
+ * transaction is "not sent".
  */
 export type SendGuard = (step: { index: number; stage: "sign" | "broadcast" }) => void;
 
@@ -677,6 +699,7 @@ export async function sendPlan(input: {
   rpcUrl: string;
   log?: (line: string) => void;
   guard?: SendGuard;
+  onSubmit?: SubmitHook;
 }): Promise<TxOutcome[]> {
   const { connection, plan, payer, rpcUrl } = input;
   const sign = input.sign ?? keypairSigner(input.signers ?? []);
@@ -710,6 +733,8 @@ export async function sendPlan(input: {
     try {
       // The wallet may have taken a while; re-check before anything leaves.
       input.guard?.({ index: i, stage: "broadcast" });
+      // Synchronously, so nothing can run between the record and the send.
+      input.onSubmit?.({ index: i, label: tx.label, signature, lastValidBlockHeight });
     } catch (err) {
       throw fail(i, `${signature} was signed but not broadcast: ${errText(err)}`, "not sent", signature);
     }
@@ -724,7 +749,7 @@ export async function sendPlan(input: {
             `Check it with: solana confirm -v ${signature} --url ${shellQuote(rpcUrl)} before retrying.`;
       throw fail(i, what, state, signature, state === "unknown" ? lastValidBlockHeight : undefined);
     }
-    let result: { value: { err: unknown } };
+    let result: { context?: { slot: number }; value: { err: unknown } };
     try {
       result = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
     } catch (err) {
@@ -738,9 +763,10 @@ export async function sendPlan(input: {
       );
     }
     if (result.value.err) {
-      throw fail(i, `${signature} landed and failed: ${JSON.stringify(result.value.err)}`, "failed", signature);
+      throw fail(i, `${signature} landed and failed: ${JSON.stringify(result.value.err)}`, "failed", signature, lastValidBlockHeight);
     }
-    done.push({ label: tx.label, signature });
+    const slot = result.context?.slot;
+    done.push({ label: tx.label, signature, lastValidBlockHeight, ...(typeof slot === "number" ? { confirmedSlot: slot } : {}) });
     log(`  tx ${i + 1}/${total} (${tx.label}) sent and confirmed: ${signature}`);
   }
   return done;

@@ -460,6 +460,35 @@ test("resume refuses an account snapshot older than the settlement evidence (cod
   assert.ok(plan.txs.length >= 1);
 });
 
+test("a confirmed attempt seen as null by a lagging RPC blocks resume (review B1)", async () => {
+  // The app saw this append confirm; its real expiry is block 500. A lagging
+  // backend (bank at block 400) does not know the signature yet: null status.
+  const confirmed = { signature: "appended", lastValidBlockHeight: 500 };
+  await assert.rejects(assertAttemptsSettled(statusReader([null], 400, 900), [confirmed]), /not resuming yet: .*appended/);
+  // The old app bug: a fabricated expiry of 0 made it look expired and let resume read bank 900.
+  assert.equal(await assertAttemptsSettled(statusReader([null], 400, 900), [{ signature: "appended", lastValidBlockHeight: 0 }]), 900);
+  // Fail closed when the expiry is unknown.
+  await assert.rejects(
+    assertAttemptsSettled(statusReader([null], 10_000_000, 900), [{ signature: "x", lastValidBlockHeight: Number.MAX_SAFE_INTEGER }]),
+    /not resuming yet/,
+  );
+  // A known confirmation slot raises the read floor even when the RPC's evidence is older.
+  assert.equal(
+    await assertAttemptsSettled(statusReader([{ slot: 950, confirmationStatus: "confirmed", err: null }], 400, 900), [{ ...confirmed, confirmedSlot: 1200 }]),
+    1200,
+  );
+  const content = json(2400);
+  const lagging = statusReader([{ slot: 950, confirmationStatus: "confirmed", err: null }], 400, 900, {
+    slot: 1000,
+    owner: INSCRIPTION_PROGRAM_ID,
+    data: fixtureInscriptionBytes(content, 600, 67n),
+  });
+  await assert.rejects(
+    prepareInscribeResume(lagging, { payer, number: 67n, content, contentType: "application/json", priorAttempts: [{ ...confirmed, confirmedSlot: 1200 }] }),
+    /older than the settlement evidence at slot 1200/,
+  );
+});
+
 /** Encode an Inscription account (inverse of decodeInscription) holding the first `written` bytes of `content`. */
 function fixtureInscriptionBytes(content: Uint8Array, written: number, n: bigint): Uint8Array {
   const out = new Uint8Array(INSCRIPTION_HEADER_LEN + written);

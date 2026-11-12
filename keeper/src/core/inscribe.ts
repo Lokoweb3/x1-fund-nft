@@ -680,8 +680,20 @@ export async function prepareInscribe(
 /** An earlier transaction of this upload whose outcome must be settled before resuming. */
 export interface PriorAttempt {
   signature: string;
-  /** From the PlanSendError (or the blockhash it was signed with). */
+  /**
+   * The real expiry from submission time: the lastValidBlockHeight of the
+   * blockhash it was signed with (sendPlan's onSubmit, TxOutcome, or
+   * PlanSendError). When it is not known, pass Number.MAX_SAFE_INTEGER
+   * ("never expires"), never 0: a too-low value lets a lagging RPC's null
+   * status make an attempt that did land look expired.
+   */
   lastValidBlockHeight: number;
+  /**
+   * For an attempt the sender saw confirmed: the slot of that confirmation.
+   * It only raises the floor that account reads must reach; it never settles
+   * an attempt on its own.
+   */
+  confirmedSlot?: number;
 }
 
 /** The RPC calls resume needs; `Connection` satisfies it. */
@@ -716,6 +728,8 @@ export async function assertAttemptsSettled(connection: ResumeReader, attempts: 
   const statuses = (await connection.getSignatureStatuses(attempts.map((a) => a.signature), { searchTransactionHistory: true })).value;
   const open: string[] = [];
   attempts.forEach((a, i) => {
+    // Known confirmation evidence from the sender: reads must be at least this new.
+    if (typeof a.confirmedSlot === "number") floor = Math.max(floor, a.confirmedSlot);
     const st = statuses[i];
     const settled = !!st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized");
     if (settled) {

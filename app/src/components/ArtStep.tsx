@@ -260,10 +260,14 @@ export function ArtStep({
     handled.current.add(record.id);
     const { number, uri, content } = insReview.inscribe;
     // Every transaction of this upload that was signed and may have been
-    // submitted. Confirmed ones are settled by their status; one with unknown
-    // status keeps its last valid block height (or, without one, never
-    // counts as expired), so resume waits until it can no longer land.
-    const sent: PriorAttempt[] = record.outcomes.map((o) => ({ signature: o.signature, lastValidBlockHeight: 0 }));
+    // submitted, each with its real expiry from submission time. Without one
+    // it never counts as expired (fail closed), so a lagging RPC's null status
+    // can never make a confirmed append look expired.
+    const sent: PriorAttempt[] = record.outcomes.map((o) => ({
+      signature: o.signature,
+      lastValidBlockHeight: o.lastValidBlockHeight ?? Number.MAX_SAFE_INTEGER,
+      ...(o.confirmedSlot !== undefined ? { confirmedSlot: o.confirmedSlot } : {}),
+    }));
     if (record.failedSig && record.failState !== "not sent") {
       sent.push({ signature: record.failedSig, lastValidBlockHeight: record.failedLastValid ?? Number.MAX_SAFE_INTEGER });
     }
