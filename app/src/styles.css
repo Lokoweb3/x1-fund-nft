@@ -1,0 +1,371 @@
+/* Plain CSS, system fonts only, light and dark. */
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --text: #16181d;
+  --muted: #5d6470;
+  --border: #d7dbe2;
+  --accent: #2456c9;
+  --accent-text: #ffffff;
+  --ok: #17703a;
+  --ok-bg: #e7f6ec;
+  --warn: #8a5a00;
+  --warn-bg: #fff4dc;
+  --err: #b3261e;
+  --err-bg: #fdecea;
+  --mainnet: #c62828;
+  --testnet: #b26a00;
+  --localnet: #1f7a3d;
+  --unknown: #5b5f68;
+  --code-bg: #eef0f4;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111317;
+    --panel: #1a1d23;
+    --text: #e8eaee;
+    --muted: #a0a7b3;
+    --border: #333844;
+    --accent: #7aa2ff;
+    --accent-text: #0b0d12;
+    --ok: #6fd28f;
+    --ok-bg: #12301d;
+    --warn: #ffc661;
+    --warn-bg: #36290d;
+    --err: #ff8a80;
+    --err-bg: #3a1513;
+    --mainnet: #e53935;
+    --testnet: #d98a00;
+    --localnet: #2e9b52;
+    --unknown: #6b707a;
+    --code-bg: #0f1115;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.app {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 12px 16px 40px;
+}
+
+h1 {
+  font-size: 1.3rem;
+  margin: 0;
+}
+h2 {
+  font-size: 1.15rem;
+  margin: 0 0 8px;
+}
+h3 {
+  font-size: 1rem;
+  margin: 12px 0 6px;
+}
+h4 {
+  margin: 10px 0 4px;
+}
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+nav {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.wrap {
+  flex-wrap: wrap;
+}
+.between {
+  justify-content: space-between;
+}
+.grow {
+  flex: 1 1 220px;
+}
+
+button {
+  font: inherit;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+button.primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+button.tab.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+button.link {
+  border: none;
+  background: none;
+  color: var(--accent);
+  padding: 2px 4px;
+  text-decoration: underline;
+}
+
+input,
+select {
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  max-width: 100%;
+}
+input[type="checkbox"] {
+  width: 1.1em;
+  height: 1.1em;
+  vertical-align: middle;
+}
+input.port {
+  width: 7em;
+}
+input.bps {
+  width: 6em;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+}
+.field input {
+  width: 100%;
+}
+.field.narrow {
+  max-width: 260px;
+}
+.grid2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0 16px;
+}
+
+.target-row {
+  display: grid;
+  grid-template-columns: 2em minmax(0, 1fr) minmax(0, 1fr) 6em auto;
+  gap: 6px;
+  align-items: center;
+  margin: 4px 0;
+}
+
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+.small {
+  font-size: 0.85rem;
+}
+.muted {
+  color: var(--muted);
+}
+.tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
+}
+
+.banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  color: #fff;
+}
+.banner strong {
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
+}
+.cluster-mainnet {
+  background: var(--mainnet);
+}
+.cluster-testnet {
+  background: var(--testnet);
+}
+.cluster-localnet {
+  background: var(--localnet);
+}
+.cluster-unknown {
+  background: var(--unknown);
+}
+
+.ack {
+  display: block;
+  margin: 10px 0 4px;
+  font-weight: 600;
+}
+
+.error {
+  color: var(--err);
+  background: var(--err-bg);
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+.warn {
+  color: var(--warn);
+  background: var(--warn-bg);
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+.warn-text {
+  color: var(--warn);
+}
+.ok {
+  color: var(--ok);
+  background: var(--ok-bg);
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.kv {
+  margin: 0;
+}
+.kv > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr);
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+.kv dt {
+  color: var(--muted);
+}
+.kv dd {
+  margin: 0;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9rem;
+}
+th,
+td {
+  text-align: left;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.sim {
+  border-left: 4px solid var(--border);
+  padding: 4px 8px;
+  margin: 6px 0;
+}
+.sim.good {
+  border-left-color: var(--ok);
+}
+.sim.bad {
+  border-left-color: var(--err);
+}
+
+pre.logs,
+pre.cmd {
+  background: var(--code-bg);
+  color: var(--text);
+  padding: 8px;
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 0.8rem;
+  max-height: 360px;
+}
+
+ul.funds,
+ul.accounts {
+  padding-left: 18px;
+}
+
+footer {
+  margin-top: 24px;
+}
+
+@media (max-width: 600px) {
+  .kv > div {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .target-row {
+    grid-template-columns: 2em minmax(0, 1fr) auto;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .target-row input.mono {
+    grid-column: 2 / -1;
+  }
+  .target-row input.bps {
+    grid-column: 2;
+    width: 100%;
+  }
+}
+
+/* The wallet modal stylesheet's Google Fonts @import is stripped at build time. */
+.wallet-adapter-button,
+.wallet-adapter-modal-wrapper,
+.wallet-adapter-dropdown-list {
+  font-family: inherit;
+}
