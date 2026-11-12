@@ -231,13 +231,19 @@ export async function prepareCreateFund(
   args: CreateFundArgs,
   xdex: PublicKey,
   metadata?: MetadataFields,
+  /**
+   * The NFT mint keypair to use, when the caller had to know the fund PDA
+   * before planning (the web app writes it into the NFT's metadata JSON).
+   * Default: a fresh keypair. Held in memory only.
+   */
+  nftMint?: Keypair,
 ): Promise<CreateFundPrepared> {
   if (metadata) {
     validateMetadataFields(metadata);
     await assertMetadataProgramDeployed(ctx.connection);
   }
   const { quote, targetMints } = await readCreateFundMints(ctx.connection, args, xdex);
-  const nft = Keypair.generate();
+  const nft = nftMint ?? Keypair.generate();
   const fund = fundPda(nft.publicKey, ctx.program.programId);
   const txs = await planCreateFund(ctx.program, ctx.payer, nft, args, quote, targetMints, ctx.budget, metadata);
   // Refuse an oversized plan before anything looks final.

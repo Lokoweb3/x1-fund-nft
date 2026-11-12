@@ -473,8 +473,18 @@ function addThaw(payer: PublicKey, number: bigint, drafts: Draft[], budget: Tran
   drafts.push({ label: `thaw NFT #${number}`, ixs: [thaw], parts: ["thaw"] });
 }
 
+/**
+ * Every transaction after the first needs the bytes the previous one wrote
+ * (an append writes at `written`, and the first append needs the account
+ * inscribe creates), so only the first can be simulated before sending.
+ */
 function finish(payer: PublicKey, drafts: Draft[], budget: TransactionInstruction[] | undefined): PlannedTx[] {
-  const txs = drafts.map((d) => ({ label: d.label, instructions: [...prefixFor(d, budget), ...d.ixs], extraSigners: [] }));
+  const txs: PlannedTx[] = drafts.map((d, i) => ({
+    label: d.label,
+    instructions: [...prefixFor(d, budget), ...d.ixs],
+    extraSigners: [],
+    ...(i > 0 ? { dependsOnPrevious: true } : {}),
+  }));
   assertPlanFits(payer, txs, "Use a smaller budget prefix.");
   return txs;
 }
