@@ -2,6 +2,7 @@ import type { Cluster, DetectedCluster } from "@core/cluster.js";
 import type { TxOutcome } from "@core/owner.js";
 import type { PublicKey } from "@solana/web3.js";
 import { SigLink } from "./ui";
+import { friendlyError } from "../lib/errors";
 
 /** One send, kept in app state (it survives navigation) until dismissed. */
 export interface SendRecord {
@@ -17,6 +18,8 @@ export interface SendRecord {
   error?: string;
   failedSig?: string;
   failState?: string;
+  /** For a failed tx that may have been submitted: the last block height it can land at. */
+  failedLastValid?: number;
   created?: { fund: PublicKey; nftMint: PublicKey };
 }
 
@@ -70,6 +73,7 @@ export function SendLog({
           )}
           {r.status === "failed" && (
             <div className="error" data-testid="send-failed">
+              {r.error && friendlyError(r.error).title !== r.error.split("\n")[0] && <p data-testid="send-failed-friendly">{friendlyError(r.error).title}</p>}
               <pre className="logs">{r.error}</pre>
               {r.outcomes.length > 0 && (
                 <ul>

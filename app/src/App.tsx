@@ -16,7 +16,8 @@ import {
 import { signAndSend, type Review } from "./lib/actions";
 import { signerId, type SessionKey } from "./lib/session";
 import { createLocalTestWallet, walletSigner, type AppSigner } from "./lib/signer";
-import { CreateFund } from "./components/CreateFund";
+import { CreateWizard } from "./components/CreateWizard";
+import { HowItWorks } from "./components/HowItWorks";
 import { FundDetail } from "./components/FundDetail";
 import { MyFunds } from "./components/MyFunds";
 import { SendLog, type SendRecord } from "./components/SendLog";
@@ -48,6 +49,8 @@ export interface AppState {
   attempted: ReadonlySet<number>;
   /** Sends whose failed transaction has unknown status; shown on later reviews of the same action. */
   unresolved: Unresolved[];
+  /** Switch the network (refused while a send is pending), e.g. from a friendly error. */
+  switchNetwork: (choice: RpcSettings["choice"]) => void;
 }
 
 export interface Unresolved {
@@ -284,7 +287,7 @@ function Shell() {
       (outcomes) => update(id, { status: "done", outcomes }),
       (err: unknown) => {
         if (err instanceof PlanSendError) {
-          update(id, { status: "failed", outcomes: err.done, error: err.message, failedSig: err.signature, failState: err.state });
+          update(id, { status: "failed", outcomes: err.done, error: err.message, failedSig: err.signature, failState: err.state, failedLastValid: err.lastValidBlockHeight });
           if (err.state === "unknown" && err.signature) {
             const signature = err.signature;
             setUnresolved((u) => [...u, { rpcUrl: review.rpcUrl, title: review.title, fund: review.plan.fund?.toBase58(), signature }]);
@@ -312,6 +315,7 @@ function Shell() {
     live,
     attempted: attemptedRef.current,
     unresolved,
+    switchNetwork: (choice) => updateRpc({ choice }),
   };
   const cluster = net?.cluster;
   const lock = sendPending ? "A send is in progress; wait for it to finish." : undefined;
@@ -422,10 +426,11 @@ function Shell() {
       />
 
       <main>
+        {(view.name === "funds" || view.name === "create") && <HowItWorks />}
         {!net && !netError && <p className="muted">Connecting...</p>}
         {view.name === "funds" && <MyFunds key={`${net?.generation ?? 0}|${signerId(signer)}`} s={state} />}
         {view.name === "fund" && <FundDetail key={`${view.fund}|${net?.generation ?? 0}`} s={state} fund={view.fund} />}
-        {view.name === "create" && <CreateFund s={state} />}
+        {view.name === "create" && <CreateWizard s={state} />}
         {view.name === "settings" && (
           <Settings
             explorer={explorer}

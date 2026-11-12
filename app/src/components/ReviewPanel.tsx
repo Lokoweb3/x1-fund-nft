@@ -51,14 +51,24 @@ export function ReviewPanel({ s, review, onClose }: { s: AppState; review: Revie
       <p className="small muted">
         {review.cluster} · <span className="mono">{review.rpcUrl}</span> · payer <span className="mono">{review.payer.toBase58()}</span>
       </p>
-      <dl className="kv">
-        {review.rows.map(([k, v], i) => (
-          <div key={i}>
-            <dt>{k}</dt>
-            <dd className="mono">{v}</dd>
-          </div>
-        ))}
-      </dl>
+      {review.sentences.length > 0 && (
+        <div className="sentences" data-testid="review-sentences">
+          {review.sentences.map((t, i) => (
+            <p key={i}>{t}</p>
+          ))}
+        </div>
+      )}
+      <details className="technical" data-testid="review-details">
+        <summary>Technical details ({review.rows.length})</summary>
+        <dl className="kv">
+          {review.rows.map(([k, v], i) => (
+            <div key={i}>
+              <dt>{k}</dt>
+              <dd className="mono">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      </details>
       {unresolved.map((u) => (
         <p key={u.signature} className="error" data-testid="unresolved-note">
           An earlier {u.title.toLowerCase()} here has UNKNOWN status and may have landed. Check signature{" "}
@@ -84,16 +94,26 @@ export function ReviewPanel({ s, review, onClose }: { s: AppState; review: Revie
                 <strong>
                   tx {i + 1}/{review.sims.length} ({sim.label})
                 </strong>{" "}
-                {sim.size} bytes · {sim.unitsConsumed ?? "?"} compute units ·{" "}
-                <span data-testid="sim-status">{sim.err ? `simulation FAILED ${JSON.stringify(sim.err)}` : "simulation ok"}</span>
+                {sim.size} bytes · {sim.skipped ? "" : `${sim.unitsConsumed ?? "?"} compute units · `}
+                <span data-testid="sim-status">
+                  {sim.skipped ? "not simulated yet" : sim.err ? `simulation FAILED ${JSON.stringify(sim.err)}` : "simulation ok"}
+                </span>
               </div>
+              {sim.skipped && (
+                <p className="small warn-text" data-testid="sim-skipped">
+                  This one needs what transaction {i} creates, so it cannot be simulated in advance. The RPC simulates it (preflight) when it is sent,
+                  after the earlier ones confirm.
+                </p>
+              )}
               <div className="small">
                 signers: {sim.signers.map((k) => k.toBase58()).join(", ")}
               </div>
-              <details>
-                <summary>Simulation logs ({sim.logs.length} lines)</summary>
-                <pre className="logs">{sim.logs.join("\n")}</pre>
-              </details>
+              {!sim.skipped && (
+                <details>
+                  <summary>Simulation logs ({sim.logs.length} lines)</summary>
+                  <pre className="logs">{sim.logs.join("\n")}</pre>
+                </details>
+              )}
             </div>
           ))}
           <details>

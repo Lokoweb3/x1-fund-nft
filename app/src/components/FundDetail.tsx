@@ -7,7 +7,13 @@ import { makeProgram, reviewDeposit, reviewEnsureVaults, reviewWithdraw, type Re
 import { createLatest, sameView, type ViewIdentity } from "../lib/latest";
 import { signerId } from "../lib/session";
 import { ReviewPanel } from "./ReviewPanel";
-import { CopyButton, errMsg, Short } from "./ui";
+import { CopyButton, errMsg, FriendlyError, Help, Short } from "./ui";
+import { readFundMetadata } from "@core/rpc.js";
+import type { MetadataUpdate, StoredMetadata } from "@core/metadata.js";
+import { reviewSetMetadata, type Labels } from "../lib/actions";
+import { useTokenLabels } from "../lib/lookups";
+import { bpsToPercent, countdown, humanInterval } from "../lib/wizard";
+import { ArtStep, type ArtResult } from "./ArtStep";
 
 /** Light polling: at most every 30 s, only while the tab is visible. */
 const POLL_MS = 30_000;
@@ -111,6 +117,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
   };
 
   const decimals = view?.quote.decimals ?? 0;
+  const labels = useTokenLabels(net, view ? [view.account.quoteMint, ...view.account.targets.map((t) => t.mint)] : []);
 
   return (
     <>
@@ -131,6 +138,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
         {error && <p className="error">{error}</p>}
         {view && (
           <>
+            <FundSummary view={view} labels={labels} />
             <dl className="kv">
               <div>
                 <dt>Fund PDA</dt>
@@ -260,12 +268,12 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
           <DepositForm
             decimals={decimals}
             disabled={!actionsEnabled}
-            onReview={(amount) => run("deposit", () => reviewDeposit(net, payer!, fundKey, amount))}
+            onReview={(amount) => run("deposit", () => reviewDeposit(net, payer!, fundKey, amount, labels))}
           />
           <WithdrawForm
             view={view}
             disabled={!actionsEnabled}
-            onReview={(mint, amount) => run("withdraw", () => reviewWithdraw(net, payer!, fundKey, mint, amount))}
+            onReview={(mint, amount) => run("withdraw", () => reviewWithdraw(net, payer!, fundKey, mint, amount, labels))}
           />
           <div className="row wrap">
             <button disabled={!actionsEnabled} onClick={() => void run("ensure", () => reviewEnsureVaults(net, payer!, fundKey))} data-testid="ensure-vaults">
@@ -290,6 +298,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
         />
       )}
 
+      {view && net && <MetadataPanel s={s} view={view} fundKey={fundKey} labels={labels} disabled={!actionsEnabled} run={run} />}
       {view && net && <KeeperStatus view={view} rpcUrl={net.rpcUrl} />}
     </>
   );
@@ -407,6 +416,166 @@ function KeeperStatus({ view, rpcUrl }: { view: FundView; rpcUrl: string }) {
         {cmd}
       </pre>
       <CopyButton text={cmd} label="copy command" />
+    </section>
+  );
+}
+
+/** The fund in words: what it pays with, what it buys, and when the next buy is. */
+function FundSummary({ view, labels }: { view: FundView; labels: Labels }) {
+  const d = view.quote.decimals;
+  const sym = (m: PublicKey) => labels[m.toBase58()]?.symbol ?? `${m.toBase58().slice(0, 4)}…`;
+  const q = sym(view.account.quoteMint);
+  const buys = view.targets.filter((t) => !t.cash);
+  const cash = view.targets.find((t) => t.cash);
+  const quoteVault = view.vaults[0]?.balance;
+  return (
+    <div className="summary" data-testid="fund-summary">
+      <p>
+        Pays with <strong>{q}</strong> <Help term="pay-with" label="pay-with" />. Every {humanInterval(view.interval)} it spends{" "}
+        {buys.map((t) => `${formatUi((view.perRun * BigInt(t.bps)) / 10_000n, d)} ${q} on ${sym(t.mint)}`).join(", ")}
+        {cash ? ` and keeps ${bpsToPercent(cash.bps)}% of deposits as cash` : ""}.
+        {quoteVault !== undefined && ` The fund holds ${formatUi(quoteVault, d)} ${q} right now.`}
+      </p>
+      <ul className="next-buys">
+        {buys.map((t) => {
+          const slice = (view.perRun * BigInt(t.bps)) / 10_000n;
+          const left = slice > 0n ? (t.budget + slice - 1n) / slice : 0n;
+          return (
+            <li key={t.index} data-testid={`next-${t.index}`}>
+              {t.due === "no budget"
+                ? `${sym(t.mint)}: nothing left to spend. Deposit ${q} to start buying again.`
+                : t.due === "due"
+                  ? `Next buy of ${sym(t.mint)}: now, as soon as a keeper runs it. ${formatUi(t.budget, d)} ${q} left (${left} buys).`
+                  : `Next buy of ${sym(t.mint)} in ${countdown(t.nextDue - view.now)}. ${formatUi(t.budget, d)} ${q} left (${left} buys).`}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/** "Set image / edit metadata": holder only, through the shared set-metadata planner. */
+function MetadataPanel({
+  s,
+  view,
+  fundKey,
+  labels,
+  disabled,
+  run,
+}: {
+  s: AppState;
+  view: FundView;
+  fundKey: PublicKey;
+  labels: Labels;
+  disabled: boolean;
+  run: (name: string, build: () => Promise<Review>) => Promise<void>;
+}) {
+  const net = s.net!;
+  const [md, setMd] = useState<{ key: string; stored: StoredMetadata | undefined; error?: string } | null>(null);
+  const key = `${net.generation}|${view.account.nftMint.toBase58()}|${s.sendTick}`;
+  useEffect(() => {
+    let cancelled = false;
+    readFundMetadata(net.connection, view.account.nftMint).then(
+      (r) => !cancelled && setMd({ key, stored: r.stored }),
+      (err: unknown) => !cancelled && setMd({ key, stored: undefined, error: errMsg(err) }),
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  const stored = md && md.key === key ? md.stored : undefined;
+  const [open, setOpen] = useState(false);
+  const [builder, setBuilder] = useState(false);
+  const [name, setName] = useState("");
+  const [symbol, setSymbol] = useState("");
+  const [uri, setUri] = useState("");
+  const [error, setError] = useState<unknown>(null);
+  useEffect(() => {
+    if (stored) {
+      setName(stored.name);
+      setSymbol(stored.symbol);
+      setUri(stored.uri);
+    }
+  }, [stored?.name, stored?.symbol, stored?.uri]); // eslint-disable-line react-hooks/exhaustive-deps
+  const holder = !!s.signer && !!view.nftAccount && view.nftAccount.owner.equals(s.signer.publicKey);
+  const onArt = (r: ArtResult) => {
+    if (r.state === "ready") {
+      setName(r.metadata.name);
+      setSymbol(r.metadata.symbol);
+      setUri(r.metadata.uri);
+    }
+  };
+  const submit = () => {
+    setError(null);
+    const update: MetadataUpdate = stored
+      ? {
+          ...(name !== stored.name ? { name } : {}),
+          ...(symbol !== stored.symbol ? { symbol } : {}),
+          ...(uri !== stored.uri ? { uri } : {}),
+        }
+      : { name, symbol, uri };
+    if (Object.keys(update).length === 0) {
+      setError(new Error("nothing changed"));
+      return;
+    }
+    void run("metadata", () => reviewSetMetadata(net, s.signer!.publicKey, fundKey, update));
+  };
+  const sym = (m: PublicKey) => labels[m.toBase58()]?.symbol ?? m.toBase58().slice(0, 4);
+  const artCtx = {
+    fund: fundKey,
+    quote: { mint: view.account.quoteMint, label: sym(view.account.quoteMint) },
+    targets: view.targets.map((t) => ({ mint: t.mint, bps: t.bps, cash: t.cash, label: sym(t.mint) })),
+  };
+  return (
+    <section className="panel" data-testid="metadata-panel">
+      <div className="row between wrap">
+        <h3>
+          NFT name and picture <Help term="nft" label="the fund NFT" />
+        </h3>
+        <button onClick={() => setOpen((o) => !o)} disabled={!holder || disabled} data-testid="edit-metadata">
+          Set image / edit metadata
+        </button>
+      </div>
+      {md?.error && <p className="error small">{md.error}</p>}
+      <p className="small" data-testid="current-metadata">
+        {stored ? (
+          <>
+            <strong>{stored.name}</strong> ({stored.symbol}) · metadata <span className="mono">{stored.uri}</span>
+          </>
+        ) : (
+          "This NFT has no name or picture yet."
+        )}
+      </p>
+      {!holder && <p className="small muted">Only the wallet that holds the fund NFT can change this.</p>}
+      {open && holder && (
+        <>
+          <div className="grid2">
+            <label className="field">
+              Name
+              <input aria-label="Metadata name" value={name} onChange={(e) => setName(e.target.value)} />
+            </label>
+            <label className="field">
+              Symbol
+              <input aria-label="Metadata symbol" value={symbol} onChange={(e) => setSymbol(e.target.value)} />
+            </label>
+          </div>
+          <label className="field">
+            Metadata link (uri)
+            <input aria-label="Metadata link" className="mono" value={uri} onChange={(e) => setUri(e.target.value)} placeholder="https://.../fund.json" />
+          </label>
+          <label className="ack small">
+            <input type="checkbox" checked={builder} onChange={(e) => setBuilder(e.target.checked)} aria-label="Build a new picture and link" /> Build a new picture and
+            metadata link here
+          </label>
+          {builder && <ArtStep s={s} ctx={artCtx} initial={{ name, symbol }} allowNone={false} onChange={onArt} />}
+          <button className="primary" disabled={disabled || !name || !symbol || !uri} onClick={submit} data-testid="metadata-review">
+            Review metadata change
+          </button>
+          {error !== null && <FriendlyError err={error} cluster={net.cluster} />}
+        </>
+      )}
     </section>
   );
 }
