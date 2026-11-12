@@ -196,6 +196,42 @@ export async function buildCreateFundIx(
     .instruction();
 }
 
+/**
+ * Native XNT (lamports) on the Fund account above its rent-exempt minimum,
+ * which is what `withdraw_native` may move (withdraw_native.rs
+ * native_available). Zero when the account is at or below the minimum.
+ */
+export function nativeAvailable(fundLamports: bigint, rentMinimum: bigint): bigint {
+  return fundLamports > rentMinimum ? fundLamports - rentMinimum : 0n;
+}
+
+export interface WithdrawNativeAccounts {
+  holder: PublicKey;
+  nftMint: PublicKey;
+  /** The holder's token account with the NFT (amount 1). */
+  nftAccount: PublicKey;
+}
+
+/** `withdraw_native(amount)`: lamports from the Fund account to the holder. */
+export async function buildWithdrawNativeIx(
+  program: ProgramT,
+  accounts: WithdrawNativeAccounts,
+  amount: bigint,
+): Promise<TransactionInstruction> {
+  if (amount <= 0n) throw new Error("--amount must be greater than zero");
+  if (amount > U64_MAX) throw new Error(`--amount ${amount} exceeds u64`);
+  return program.methods
+    .withdrawNative(new BN(amount.toString()))
+    .accountsStrict({
+      holder: accounts.holder,
+      fund: fundPda(accounts.nftMint, program.programId),
+      nftMint: accounts.nftMint,
+      nftAccount: accounts.nftAccount,
+      nftTokenProgram: NFT_TOKEN_PROGRAM_ID,
+    })
+    .instruction();
+}
+
 export function associatedTokenAddress(owner: PublicKey, mint: PublicKey, tokenProgram: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync(
     [owner.toBuffer(), tokenProgram.toBuffer(), mint.toBuffer()],

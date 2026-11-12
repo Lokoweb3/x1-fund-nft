@@ -1,5 +1,6 @@
 /**
- * Owner CLI for fund NFTs: create-fund, deposit, withdraw, show, ensure-vaults.
+ * Owner CLI for fund NFTs: create-fund, deposit, withdraw, withdraw-native, show,
+ * ensure-vaults, set-metadata.
  *
  * Default is simulate-only. A send needs --send, KEYPAIR, and
  * `--cluster <mainnet|testnet|localnet>` matching the RPC's genesis hash
@@ -51,6 +52,8 @@ import {
   prepareEnsureVaults,
   prepareSetMetadata,
   prepareWithdraw,
+  prepareWithdrawNative,
+  readNativeBalance,
   readFundMetadata,
   simulateTx,
   type PlanContext,
@@ -141,6 +144,9 @@ async function main(): Promise<void> {
       break;
     case "withdraw":
       plan = await planWithdraw(ctx, parsed);
+      break;
+    case "withdraw-native":
+      plan = await planWithdrawNative(ctx, parsed);
       break;
     case "ensure-vaults":
       plan = await planEnsureVaults(ctx, parsed.fund);
@@ -281,6 +287,24 @@ async function planWithdraw(ctx: Ctx, parsed: Extract<ParsedCli, { command: "wit
   return plan;
 }
 
+async function planWithdrawNative(ctx: Ctx, parsed: Extract<ParsedCli, { command: "withdraw-native" }>): Promise<Plan> {
+  const { plan, summary: s } = await prepareWithdrawNative(planContext(ctx), parsed.fund, parsed.amount);
+  const b = s.balance;
+  console.log("\nSummary of withdraw-native:");
+  console.log(`  fund             ${s.fund.toBase58()}`);
+  console.log(`  holder           ${s.holder.toBase58()} (receives the XNT)`);
+  console.log(`  NFT account      ${s.nftAccount ? `${s.nftAccount.address.toBase58()} (owner ${s.nftAccount.owner.toBase58()})` : "not found"}`);
+  console.log(`  fund XNT         ${formatUi(b.lamports, 9)} (raw ${b.lamports})`);
+  console.log(`  rent reserve     ${formatUi(b.rentMinimum, 9)} (rent-exempt minimum for ${b.dataLength} bytes; stays)`);
+  console.log(`  available        ${formatUi(b.available, 9)} (raw ${b.available})`);
+  console.log(`  amount           ${formatUi(s.amount, 9)} XNT (raw ${s.amount} lamports)`);
+  console.log("  vaults, budgets and targets are not touched");
+  if (!s.payerHoldsNft) {
+    console.log(`  WARNING: ${ctx.payer.toBase58()} does not hold the fund NFT; the program will reject this`);
+  }
+  return plan;
+}
+
 /** Create any missing quote/target vault ATAs. With none missing it sends nothing. */
 async function planEnsureVaults(ctx: Ctx, fundKey: PublicKey): Promise<Plan> {
   const { plan, vaults, missing } = await prepareEnsureVaults(planContext(ctx), fundKey);
@@ -353,6 +377,12 @@ async function show(connection: Connection, program: ProgramT, fundKey: PublicKe
       vault.balance === undefined ? "missing" : `${formatUi(vault.balance, vault.mint.decimals)} (raw ${vault.balance})`;
     console.log(`  ${vault.mint.address.toBase58()} ${vault.vault.toBase58()} ${bal}`);
   }
+  const native = await readNativeBalance(connection, fundKey);
+  console.log(
+    `native XNT available to withdraw: ${formatUi(native.available, 9)} ` +
+      `(raw ${native.available}; fund holds ${formatUi(native.lamports, 9)}, ` +
+      `${formatUi(native.rentMinimum, 9)} stays for rent)`,
+  );
 }
 
 /**

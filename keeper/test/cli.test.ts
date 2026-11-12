@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import { Connection, Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { X1_MAINNET_GENESIS_HASH, X1_TESTNET_GENESIS_HASH } from "../src/cluster.js";
-import { createProgram } from "../src/fund.js";
+import { createProgram, IDL } from "../src/fund.js";
 import {
   assertPlanFits,
   buildCreateFundIx,
+  buildWithdrawNativeIx,
   checkPool,
   fundVaults,
   MAX_TX_BYTES,
+  nativeAvailable,
+  NFT_TOKEN_PROGRAM_ID,
+  USAGE,
   planCreateFund,
   readTransferFeeConfig,
   transferFeeFor,
@@ -481,4 +486,112 @@ test("transfer fee: TLV parse and fee math", () => {
   const noFee = Buffer.alloc(170);
   noFee[165] = 1;
   assert.equal(readTransferFeeConfig(noFee), undefined);
+});
+
+test("withdraw-native parses raw lamports and all, and nothing else", () => {
+  const raw = parseCli(["withdraw-native", "--fund", QUOTE, "--amount", "1500000", "--payer", QUOTE]);
+  assert.equal(raw.command, "withdraw-native");
+  if (raw.command !== "withdraw-native") return;
+  assert.ok(raw.fund.equals(new PublicKey(QUOTE)));
+  assert.equal(raw.amount, 1_500_000n);
+  assert.ok(raw.options.payer!.equals(new PublicKey(QUOTE)));
+  assert.equal(raw.options.send, false);
+  const all = parseCli(["withdraw-native", "--fund", QUOTE, "--amount", "all"]);
+  assert.equal(all.command === "withdraw-native" && all.amount, "all");
+  const max = parseCli(["withdraw-native", "--fund", QUOTE, "--amount", "18446744073709551615"]);
+  assert.equal(max.command === "withdraw-native" && max.amount, (1n << 64n) - 1n);
+
+  assert.throws(() => parseCli(["withdraw-native", "--fund", QUOTE]), /requires --amount/);
+  assert.throws(() => parseCli(["withdraw-native", "--amount", "1"]), /requires --fund/);
+  assert.throws(() => parseCli(["withdraw-native", "--fund", QUOTE, "--amount", "0"]), /greater than zero/);
+  assert.throws(() => parseCli(["withdraw-native", "--fund", QUOTE, "--amount", "1.5"]), /non-negative integer/);
+  assert.throws(() => parseCli(["withdraw-native", "--fund", QUOTE, "--amount", "-1"]), /non-negative integer/);
+  assert.throws(() => parseCli(["withdraw-native", "--fund", QUOTE, "--amount", "ALL"]), /non-negative integer/);
+  assert.throws(
+    () => parseCli(["withdraw-native", "--fund", QUOTE, "--amount", "18446744073709551616"]),
+    /exceeds/,
+  );
+  // No token mint: --mint belongs to withdraw.
+  assert.throws(
+    () => parseCli(["withdraw-native", "--fund", QUOTE, "--mint", QUOTE, "--amount", "1"]),
+    /unknown or misplaced/,
+  );
+  assert.throws(() => parseCli(["withdraw-native", "--fund", QUOTE, "--fund", QUOTE, "--amount", "1"]), /more than once/);
+  assert.match(USAGE, /withdraw-native --fund <pda> --amount <lamports\|all>/);
+});
+
+test("withdraw-native carries the same send flags as withdraw through the same gate", () => {
+  const argv = ["withdraw-native", "--fund", QUOTE, "--amount", "all"];
+  const mainnet = { genesisHash: X1_MAINNET_GENESIS_HASH, rpcUrl: "https://rpc.mainnet.x1.xyz", keypairEnv: "/k.json" };
+  // Simulate-only without --send, even with KEYPAIR set.
+  assert.deepEqual(sendGate({ options: parseCli(argv).options, ...mainnet }), { send: false });
+  // --send alone, then without --i-understand-mainnet, are refused.
+  assert.throws(() => sendGate({ options: parseCli([...argv, "--send"]).options, ...mainnet }), /requires --cluster/);
+  assert.throws(
+    () => sendGate({ options: parseCli([...argv, "--send", "--cluster", "mainnet"]).options, ...mainnet }),
+    /--i-understand-mainnet/,
+  );
+  assert.throws(
+    () => sendGate({ options: parseCli([...argv, "--send", "--cluster", "testnet"]).options, ...mainnet }),
+    /is mainnet/,
+  );
+  assert.throws(
+    () =>
+      sendGate({
+        options: parseCli([...argv, "--send", "--cluster", "mainnet", "--i-understand-mainnet"]).options,
+        ...mainnet,
+        keypairEnv: undefined,
+      }),
+    /needs KEYPAIR/,
+  );
+  assert.deepEqual(
+    sendGate({ options: parseCli([...argv, "--send", "--cluster", "mainnet", "--i-understand-mainnet"]).options, ...mainnet }),
+    { send: true, cluster: "mainnet" },
+  );
+});
+
+test("native available is lamports above the rent-exempt minimum", () => {
+  const rent = 3_000_000n;
+  assert.equal(nativeAvailable(rent, rent), 0n);
+  assert.equal(nativeAvailable(rent - 1n, rent), 0n);
+  assert.equal(nativeAvailable(0n, rent), 0n);
+  assert.equal(nativeAvailable(rent + 1n, rent), 1n);
+  assert.equal(nativeAvailable(rent + 123_456n, rent), 123_456n);
+});
+
+test("withdraw_native builder names the program's accounts in IDL order", async () => {
+  const program = createProgram(
+    new AnchorProvider(new Connection("http://127.0.0.1:1"), new Wallet(Keypair.generate()), {}),
+  );
+  const holder = Keypair.generate().publicKey;
+  const nftMint = Keypair.generate().publicKey;
+  const nftAccount = Keypair.generate().publicKey;
+  const ix = await buildWithdrawNativeIx(program, { holder, nftMint, nftAccount }, 4_200n);
+  assert.ok(ix.programId.equals(PROGRAM_ID));
+  assert.deepEqual(
+    ix.keys.map((k) => [k.pubkey.toBase58(), k.isSigner, k.isWritable]),
+    [
+      [holder.toBase58(), true, true],
+      [fundPda(nftMint).toBase58(), false, true],
+      [nftMint.toBase58(), false, false],
+      [nftAccount.toBase58(), false, false],
+      [NFT_TOKEN_PROGRAM_ID.toBase58(), false, false],
+    ],
+  );
+  // Discriminator sha256("global:withdraw_native")[..8], then amount u64 LE.
+  const disc = createHash("sha256").update("global:withdraw_native").digest().subarray(0, 8);
+  assert.deepEqual([...ix.data.subarray(0, 8)], [...disc]);
+  assert.equal(ix.data.length, 16);
+  assert.equal(ix.data.readBigUInt64LE(8), 4_200n);
+  await assert.rejects(buildWithdrawNativeIx(program, { holder, nftMint, nftAccount }, 0n), /greater than zero/);
+  await assert.rejects(buildWithdrawNativeIx(program, { holder, nftMint, nftAccount }, 1n << 64n), /exceeds u64/);
+
+  // The IDL appends the instruction and the error; earlier ones keep their codes.
+  const names = IDL.instructions.map((i) => i.name);
+  assert.equal(names[names.length - 1], "withdraw_native");
+  const errors = IDL.errors ?? [];
+  const native = errors.find((e) => e.name === "NativeAboveAvailable");
+  assert.equal(native?.code, 6054);
+  assert.equal(errors.find((e) => e.name === "PayerChanged")?.code, 6053);
+  assert.equal(Math.max(...errors.map((e) => e.code)), 6054);
 });

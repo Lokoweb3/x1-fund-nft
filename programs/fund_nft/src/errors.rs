@@ -110,4 +110,6 @@ pub enum FundError {
     PayerNotWallet,
     #[msg("Token Metadata changed the holder account's owner or data")]
     PayerChanged,
+    #[msg("Withdrawal would leave the fund below rent exemption")]
+    NativeAboveAvailable,
 }

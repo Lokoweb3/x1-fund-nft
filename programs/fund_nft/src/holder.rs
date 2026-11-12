@@ -1,5 +1,5 @@
-//! The NFT-holder check shared by `withdraw`, `attach_metadata`, and
-//! `update_metadata`.
+//! The NFT-holder check shared by `withdraw`, `withdraw_native`,
+//! `attach_metadata`, and `update_metadata`.
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{Mint, TokenAccount};

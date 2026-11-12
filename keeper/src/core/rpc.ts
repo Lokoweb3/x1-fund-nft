@@ -24,6 +24,7 @@ import { decodeFund, dueTargets, type FundAccount } from "./fund.js";
 import {
   assertPlanFits,
   associatedTokenAddress,
+  buildWithdrawNativeIx,
   checkPool,
   compileTx,
   createAtaIdempotentIx,
@@ -31,6 +32,7 @@ import {
   fundPda,
   fundVaults,
   MAX_TARGETS,
+  nativeAvailable,
   NFT_TOKEN_PROGRAM_ID,
   planCreateFund,
   PROGRAM_ID,
@@ -452,6 +454,82 @@ export async function prepareWithdraw(
       fee,
       destination,
       isQuote: mintKey.equals(fund.quoteMint),
+      payerHoldsNft: nftAccount !== undefined && nftAccount.owner.equals(ctx.payer),
+    },
+  };
+}
+
+// ---- withdraw-native ----
+
+export interface NativeBalance {
+  lamports: bigint;
+  dataLength: number;
+  /** Rent-exempt minimum for the Fund account's current data length. */
+  rentMinimum: bigint;
+  /** lamports - rentMinimum, floored at 0: what withdraw_native may move. */
+  available: bigint;
+}
+
+/** Native XNT on the Fund account and how much of it the holder can withdraw. */
+export async function readNativeBalance(connection: Connection, fundKey: PublicKey): Promise<NativeBalance> {
+  const info = await connection.getAccountInfo(fundKey, "confirmed");
+  if (!info) throw new Error(`fund ${fundKey.toBase58()} does not exist`);
+  const lamports = BigInt(info.lamports);
+  const rentMinimum = BigInt(await connection.getMinimumBalanceForRentExemption(info.data.length, "confirmed"));
+  return { lamports, dataLength: info.data.length, rentMinimum, available: nativeAvailable(lamports, rentMinimum) };
+}
+
+export interface WithdrawNativeSummary {
+  fund: PublicKey;
+  fundAccount: FundAccount;
+  holder: PublicKey;
+  nftAccount: NftAccount | undefined;
+  balance: NativeBalance;
+  amount: bigint;
+  /** False when the payer does not hold the NFT; the program will reject it. */
+  payerHoldsNft: boolean;
+}
+
+export async function prepareWithdrawNative(
+  ctx: PlanContext,
+  fundKey: PublicKey,
+  requested: bigint | "all",
+): Promise<{ plan: Plan; summary: WithdrawNativeSummary }> {
+  if (requested === 0n) throw new Error("--amount must be greater than zero");
+  const fund = await loadFund(ctx.connection, ctx.program, fundKey);
+  const balance = await readNativeBalance(ctx.connection, fundKey);
+  const amount = requested === "all" ? balance.available : requested;
+  if (amount === 0n) {
+    throw new Error(
+      `fund ${fundKey.toBase58()} has no native XNT above its rent-exempt minimum ` +
+        `(${formatUi(balance.lamports, 9)} held, ${formatUi(balance.rentMinimum, 9)} reserved for rent)`,
+    );
+  }
+  if (amount > balance.available) {
+    throw new Error(
+      `withdraw-native ${formatUi(amount, 9)} exceeds the ${formatUi(balance.available, 9)} XNT available ` +
+        `(fund holds ${formatUi(balance.lamports, 9)}, ${formatUi(balance.rentMinimum, 9)} stays for rent)`,
+    );
+  }
+  const nftAccount = await findNftAccount(ctx.connection, fund.nftMint);
+  const ix = await buildWithdrawNativeIx(
+    ctx.program,
+    {
+      holder: ctx.payer,
+      nftMint: fund.nftMint,
+      nftAccount: nftAccount ? nftAccount.address : associatedTokenAddress(ctx.payer, fund.nftMint, NFT_TOKEN_PROGRAM_ID),
+    },
+    amount,
+  );
+  return {
+    plan: { txs: [{ label: "withdraw_native", instructions: [...ctx.budget, ix], extraSigners: [] }], fund: fundKey },
+    summary: {
+      fund: fundKey,
+      fundAccount: fund,
+      holder: ctx.payer,
+      nftAccount,
+      balance,
+      amount,
       payerHoldsNft: nftAccount !== undefined && nftAccount.owner.equals(ctx.payer),
     },
   };

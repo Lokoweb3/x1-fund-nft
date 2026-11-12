@@ -57,4 +57,8 @@ pub mod fund_nft {
     ) -> Result<()> {
         instructions::metadata::handle_update_metadata(ctx, name, symbol, uri)
     }
+
+    pub fn withdraw_native(ctx: Context<WithdrawNative>, amount: u64) -> Result<()> {
+        instructions::withdraw_native::handle_withdraw_native(ctx, amount)
+    }
 }

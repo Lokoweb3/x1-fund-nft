@@ -421,6 +421,57 @@ expect_out "withdraw confirmed" "tx 1/1 \(withdraw\) sent and confirmed"
 run_fail "$STRANGER_KEY" "non-holder withdraw from the metadata fund is rejected" "BadNft" \
   withdraw --fund "$MDFUND" --mint "$USDC" --amount 1 --send --cluster localnet
 
+echo; echo "== withdraw-native (XNT sent to the fund PDA, e.g. reflections)"
+lamports_of() { solana -C "$CFG" balance "$1" --lamports | awk '{print $1}'; }
+FUND_SPACE="$(solana -C "$CFG" account "$FUND" --output json | jq -r '.account.space')"
+FUND_RENT="$(solana -C "$CFG" rent "$FUND_SPACE" --lamports | awk '/Rent-exempt minimum/ {print $3}')"
+[ -n "$FUND_RENT" ] && [ "$(lamports_of "$FUND")" = "$FUND_RENT" ] &&
+  pass "fund holds exactly its rent-exempt minimum ($FUND_RENT for $FUND_SPACE bytes)" ||
+  fail "fund lamports $(lamports_of "$FUND") != rent minimum '$FUND_RENT'"
+run_ok "" "show: nothing native to withdraw yet" show --fund "$FUND"
+expect_out "show prints native available 0" "^native XNT available to withdraw: 0 \\(raw 0;"
+run_fail "$PAYER_KEY" "withdraw-native all with nothing available is refused client-side" "no native XNT above its rent-exempt minimum" \
+  withdraw-native --fund "$FUND" --amount all
+if solana -C "$CFG" transfer "$FUND" 0.5 --keypair "$PAYER_KEY" >"$OUT" 2>&1; then
+  pass "System transfer of 0.5 XNT to the fund PDA"
+else
+  fail "System transfer to the fund PDA"
+fi
+sed 's/^/    /' "$OUT"
+run_ok "" "show after the transfer" show --fund "$FUND"
+expect_out "show prints native available 0.5" "^native XNT available to withdraw: 0.5 \\(raw 500000000;"
+run_ok "" "withdraw-native simulate-only with --payer" withdraw-native --fund "$FUND" --amount 200000000 --payer "$PAYER"
+expect_out "withdraw-native simulated" "simulation: ok, [0-9]+ compute units"
+expect_out "withdraw-native simulate-only sent nothing" "nothing was signed or sent"
+run_fail "$PAYER_KEY" "withdraw-native send without --cluster is refused" "requires --cluster" \
+  withdraw-native --fund "$FUND" --amount all --send
+run_fail "$PAYER_KEY" "withdraw-native send with --cluster mainnet on localnet is refused" "is localnet" \
+  withdraw-native --fund "$FUND" --amount all --send --cluster mainnet --i-understand-mainnet
+run_fail "$STRANGER_KEY" "non-holder withdraw-native is rejected by the program" "BadNft" \
+  withdraw-native --fund "$FUND" --amount 1 --send --cluster localnet
+expect_out "non-holder withdraw-native warning printed" "does not hold the fund NFT"
+PAYER_BEFORE="$(lamports_of "$PAYER")"
+run_ok "$PAYER_KEY" "holder withdraw-native 0.2 XNT --send" withdraw-native --fund "$FUND" --amount 200000000 --send --cluster localnet
+expect_out "withdraw-native confirmed" "tx 1/1 \\(withdraw_native\\) sent and confirmed"
+PAYER_AFTER="$(lamports_of "$PAYER")"
+GAIN=$((PAYER_AFTER - PAYER_BEFORE))
+# The holder pays the fee (at most 0.0001 XNT here), so the gain is just under 0.2.
+[ "$GAIN" -le 200000000 ] && [ "$GAIN" -gt 199900000 ] && pass "holder gained 0.2 XNT less the fee ($GAIN)" ||
+  fail "holder gained $GAIN lamports, expected 0.2 XNT less the fee"
+run_ok "" "show after the partial withdraw-native" show --fund "$FUND"
+expect_out "show prints native available 0.3" "^native XNT available to withdraw: 0.3 \\(raw 300000000;"
+run_fail "$PAYER_KEY" "withdraw-native one lamport above available is refused client-side" "exceeds the 0.3 XNT available" \
+  withdraw-native --fund "$FUND" --amount 300000001 --send --cluster localnet
+run_ok "$PAYER_KEY" "holder withdraw-native all --send" withdraw-native --fund "$FUND" --amount all --send --cluster localnet
+expect_out "withdraw-native all moves 0.3" "amount +0.3 XNT \\(raw 300000000 lamports\\)"
+[ "$(lamports_of "$FUND")" = "$FUND_RENT" ] && pass "fund is back at exactly its rent-exempt minimum" ||
+  fail "fund lamports $(lamports_of "$FUND") after withdraw-native all, expected $FUND_RENT"
+run_ok "" "show after withdraw-native all" show --fund "$FUND"
+expect_out "show prints native available 0 again" "^native XNT available to withdraw: 0 \\(raw 0;"
+expect_out "withdraw-native left the budgets alone" "budget total +0 quote \\(raw 0\\)"
+expect_out "withdraw-native left the quote vault alone" "$USDC [1-9A-HJ-NP-Za-km-z]+ 0 \\(raw 0\\)"
+expect_out "withdraw-native left the metadata alone" 'NFT metadata +"First fund" \("F1"\) https://example.invalid/e2e/3.json'
+
 echo
 echo "e2e-local: $PASS passed, $FAIL failed (feature mode ${E2E_FEATURES:-x1}, NFT $NFT)"
 [ "$FAIL" = 0 ]

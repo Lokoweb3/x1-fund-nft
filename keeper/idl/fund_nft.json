@@ -752,6 +752,48 @@
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "withdraw_native",
+      "discriminator": [
+        113,
+        227,
+        26,
+        32,
+        53,
+        66,
+        90,
+        250
+      ],
+      "accounts": [
+        {
+          "name": "holder",
+          "docs": [
+            "Current NFT holder. Receives the lamports."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "fund",
+          "writable": true
+        },
+        {
+          "name": "nft_mint"
+        },
+        {
+          "name": "nft_account"
+        },
+        {
+          "name": "nft_token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
     }
   ],
   "accounts": [
@@ -807,6 +849,19 @@
         90,
         189,
         44
+      ]
+    },
+    {
+      "name": "NativeWithdrawn",
+      "discriminator": [
+        246,
+        53,
+        192,
+        152,
+        247,
+        174,
+        2,
+        252
       ]
     }
   ],
@@ -1080,6 +1135,11 @@
       "code": 6053,
       "name": "PayerChanged",
       "msg": "Token Metadata changed the holder account's owner or data"
+    },
+    {
+      "code": 6054,
+      "name": "NativeAboveAvailable",
+      "msg": "Withdrawal would leave the fund below rent exemption"
     }
   ],
   "types": [
@@ -1243,6 +1303,26 @@
           {
             "name": "holder",
             "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "NativeWithdrawn",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "fund",
+            "type": "pubkey"
+          },
+          {
+            "name": "holder",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
           }
         ]
       }
