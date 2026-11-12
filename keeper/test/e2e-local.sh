@@ -17,10 +17,27 @@
 # Rust test's 18999/19000/19901 and its default dynamic range.
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KEEPER="$(cd "$HERE/.." && pwd)"
-REPO="$(cd "$KEEPER/.." && pwd)"
-export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+die() { echo "FATAL: $*" >&2; exit 2; }
+PASS=0
+FAIL=0
+pass() { PASS=$((PASS + 1)); echo "PASS: $*"; }
+fail() { FAIL=$((FAIL + 1)); echo "FAIL: $*"; }
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || die "cannot resolve the script dir"
+KEEPER="$(cd "$HERE/.." && pwd -P)" || die "cannot resolve keeper/"
+REPO="$(cd "$KEEPER/.." && pwd -P)" || die "cannot resolve the repo root"
+[ -n "$HERE" ] && [ -n "$KEEPER" ] && [ -n "$REPO" ] || die "empty script paths"
+
+# Agave binaries are resolved once and are NOT added to PATH. Every call goes
+# through the wrappers below, which run with HOME pointed at an empty dir
+# inside $WORK, so no tool can fall back to ~/.config/solana or the user's
+# default wallet.
+SOLANA_BIN_DIR="${SOLANA_BIN_DIR:-$HOME/.local/share/solana/install/active_release/bin}"
+for b in solana solana-keygen spl-token solana-test-validator; do
+  [ -x "$SOLANA_BIN_DIR/$b" ] || die "missing $SOLANA_BIN_DIR/$b"
+done
+command -v jq >/dev/null || die "jq is required"
+command -v python3 >/dev/null || die "python3 is required"
 
 MAINNET_RPC="https://rpc.mainnet.x1.xyz"
 PROGRAM_ID="6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM"
@@ -38,22 +55,65 @@ TOKEN_2022="TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 ATA_PROGRAM="ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 X1_SYSVAR_SYSCALL_EXCEPTION="CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq"
 
-PASS=0
-FAIL=0
-pass() { PASS=$((PASS + 1)); echo "PASS: $*"; }
-fail() { FAIL=$((FAIL + 1)); echo "FAIL: $*"; }
-die() { echo "FATAL: $*" >&2; exit 2; }
-
 SO="$REPO/target/deploy/fund_nft.so"
 [ -f "$SO" ] || die "missing $SO; run: anchor build --ignore-keys --arch v0"
 
+# Work dir: absolute, freshly created, and strictly under E2E_SCRATCH. No path
+# is derived from WORK, and the cleanup trap is not installed, until this
+# validation has passed.
 SCRATCH="${E2E_SCRATCH:-${TMPDIR:-/tmp}}"
-mkdir -p "$SCRATCH"
-WORK="$(mktemp -d "$SCRATCH/fund-cli-e2e.XXXXXX")"
-case "$WORK" in
-  "$REPO"/keys*|*/keys/*) die "refusing to use a work dir under keys/: $WORK" ;;
-esac
+case "$SCRATCH" in /*) ;; *) die "E2E_SCRATCH must be an absolute path: $SCRATCH" ;; esac
+mkdir -p -- "$SCRATCH" || die "cannot create $SCRATCH"
+SCRATCH="$(cd -- "$SCRATCH" && pwd -P)" || die "cannot resolve $SCRATCH"
+[ -n "$SCRATCH" ] && [ "$SCRATCH" != "/" ] || die "refusing scratch dir '$SCRATCH'"
+case "$SCRATCH/" in "$REPO/keys/"*) die "refusing a scratch dir under keys/: $SCRATCH" ;; esac
+WORK="$(mktemp -d -- "$SCRATCH/fund-cli-e2e.XXXXXX")" || die "mktemp failed under $SCRATCH"
+[ -n "$WORK" ] || die "mktemp returned an empty path"
+case "$WORK" in "$SCRATCH"/fund-cli-e2e.??????) ;; *) die "work dir $WORK is not under $SCRATCH" ;; esac
+[ -d "$WORK" ] && [ ! -L "$WORK" ] || die "work dir $WORK is not a plain directory"
 echo "work dir: $WORK"
+
+VALIDATOR_PID=""
+cleanup() {
+  if [ -n "$VALIDATOR_PID" ]; then kill "$VALIDATOR_PID" 2>/dev/null; wait "$VALIDATOR_PID" 2>/dev/null; fi
+  if [ "${E2E_KEEP:-0}" = 1 ]; then
+    echo "kept $WORK"
+  else
+    case "$WORK" in "$SCRATCH"/fund-cli-e2e.??????) rm -rf -- "$WORK" ;; esac
+  fi
+}
+trap cleanup EXIT
+
+SOL_HOME="$WORK/home"
+CFG="$WORK/solana-cli.yml"
+mkdir -- "$SOL_HOME" || die "cannot create $SOL_HOME"
+
+# Wrappers. solana, spl-token and solana-test-validator die unless the call
+# passes `-C "$CFG"`; all four run with HOME=$SOL_HOME.
+require_cfg() {
+  local tool="$1"; shift
+  local prev=""
+  for a in "$@"; do
+    if [ "$prev" = "-C" ]; then
+      [ "$a" = "$CFG" ] && return 0
+      die "$tool called with -C $a, not $CFG"
+    fi
+    prev="$a"
+  done
+  die "$tool called without -C \"\$CFG\": $tool $*"
+}
+sol_exec() {
+  local bin="$1"; shift
+  HOME="$SOL_HOME" XDG_CONFIG_HOME="$SOL_HOME/.config" "$SOLANA_BIN_DIR/$bin" "$@"
+}
+solana() { require_cfg solana "$@"; sol_exec solana "$@"; }
+spl-token() { require_cfg spl-token "$@"; sol_exec spl-token "$@"; }
+solana-test-validator() { require_cfg solana-test-validator "$@"; sol_exec solana-test-validator "$@"; }
+# solana-keygen here only writes `-o $WORK/...` or reads a $WORK file by path.
+solana-keygen() {
+  case "$*" in *"$WORK"/*) ;; *) die "solana-keygen must name a file under \$WORK: $*" ;; esac
+  sol_exec solana-keygen "$@"
+}
 
 port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 RPC_PORT=""
@@ -63,7 +123,6 @@ for base in 18989 19039 19089; do
   if [ "$ok" = 1 ]; then RPC_PORT=$base; break; fi
 done
 [ -n "$RPC_PORT" ] || die "no free 42-port block near 18989"
-WS_PORT=$((RPC_PORT + 1))
 FAUCET_PORT=$((RPC_PORT + 2))
 GOSSIP_PORT=$((RPC_PORT + 3))
 DYN_LO=$((RPC_PORT + 4))
@@ -71,29 +130,25 @@ DYN_HI=$((RPC_PORT + 41))
 URL="http://127.0.0.1:$RPC_PORT"
 echo "validator: $URL (faucet $FAUCET_PORT, dynamic $DYN_LO-$DYN_HI)"
 
-VALIDATOR_PID=""
-cleanup() {
-  if [ -n "$VALIDATOR_PID" ]; then kill "$VALIDATOR_PID" 2>/dev/null; wait "$VALIDATOR_PID" 2>/dev/null; fi
-  if [ "${E2E_KEEP:-0}" = 1 ]; then echo "kept $WORK"; else rm -rf "$WORK"; fi
-}
-trap cleanup EXIT
-
-CFG="$WORK/solana-cli.yml"
 PAYER_KEY="$WORK/payer.json"
 STRANGER_KEY="$WORK/stranger.json"
 solana-keygen new --no-bip39-passphrase --silent --force -o "$PAYER_KEY" >/dev/null || die "keygen payer"
 solana-keygen new --no-bip39-passphrase --silent --force -o "$STRANGER_KEY" >/dev/null || die "keygen stranger"
-PAYER="$(solana-keygen pubkey "$PAYER_KEY")"
-STRANGER="$(solana-keygen pubkey "$STRANGER_KEY")"
+PAYER="$(solana-keygen pubkey "$PAYER_KEY")" || die "payer pubkey"
+STRANGER="$(solana-keygen pubkey "$STRANGER_KEY")" || die "stranger pubkey"
+[ -n "$PAYER" ] && [ -n "$STRANGER" ] || die "empty pubkeys"
+# The config file is written before any other solana call so -C always names
+# an existing file with a $WORK keypair.
 solana -C "$CFG" config set --url "$URL" --keypair "$PAYER_KEY" >/dev/null || die "config"
+[ -f "$CFG" ] || die "config file $CFG was not written"
 echo "payer $PAYER, stranger $STRANGER"
 
 # The quote mint the script controls: the cloned USDC.X with one labeled local
 # change, mint authority := payer (as tests/src/lib.rs does). Its pool side
 # matches the USDC.X/TEST pool, so the fund can pin TEST to that pool.
 USDC_FILE="$WORK/usdc-mint.authority-overridden.json"
-solana account "$USDC" --url "$MAINNET_RPC" --output json -o "$USDC_FILE" >/dev/null || die "dump USDC.X"
-python3 - "$USDC_FILE" "$PAYER" <<'PY' || die "override mint authority"
+solana -C "$CFG" account "$USDC" --url "$MAINNET_RPC" --output json -o "$USDC_FILE" >/dev/null || die "dump USDC.X"
+python3 -I - "$USDC_FILE" "$PAYER" <<'PY' || die "override mint authority"
 import base64, json, sys
 path, authority = sys.argv[1], sys.argv[2]
 ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -112,8 +167,10 @@ PY
 FEATURE_ARGS=()
 case "${E2E_FEATURES:-x1}" in
   x1)
-    mapfile -t INACTIVE < <(solana feature status --display-all --output json --url "$MAINNET_RPC" |
-      jq -r '.features[] | select(.status != "active") | .id')
+    FEATURES_JSON="$WORK/x1-features.json"
+    solana -C "$CFG" feature status --display-all --output json --url "$MAINNET_RPC" >"$FEATURES_JSON" ||
+      die "could not read X1 feature status"
+    mapfile -t INACTIVE < <(jq -r '.features[] | select(.status != "active") | .id' "$FEATURES_JSON")
     [ "${#INACTIVE[@]}" -gt 0 ] || die "could not read X1 feature status"
     for f in "${INACTIVE[@]}"; do
       [ "$f" = "$X1_SYSVAR_SYSCALL_EXCEPTION" ] || FEATURE_ARGS+=(--deactivate-feature "$f")
@@ -126,7 +183,9 @@ esac
 
 CLONES=()
 for a in "$POOL" "$AMM" "$OBS" "$VAULT_0" "$VAULT_1" "$TEST_MINT" "$AUTHORITY" "$ATA_PROGRAM"; do CLONES+=(--clone "$a"); done
-solana-test-validator --reset --quiet \
+# --mint names the faucet/mint pubkey explicitly, so the validator never
+# derives it from a default keypair file.
+solana-test-validator -C "$CFG" --mint "$PAYER" --reset --quiet \
   --bind-address 127.0.0.1 --rpc-port "$RPC_PORT" --faucet-port "$FAUCET_PORT" \
   --gossip-port "$GOSSIP_PORT" --dynamic-port-range "$DYN_LO-$DYN_HI" \
   --ledger "$WORK/ledger" \
@@ -145,11 +204,14 @@ for _ in $(seq 1 240); do
 done
 solana -C "$CFG" cluster-version >/dev/null 2>&1 || { tail -40 "$WORK/validator.log"; die "validator not healthy"; }
 echo "validator healthy"
+# Nothing may have appeared under the sandbox HOME's .config/solana.
+[ ! -e "$SOL_HOME/.config/solana/id.json" ] || die "a tool created a default wallet under $SOL_HOME"
 
 solana -C "$CFG" airdrop 10 "$PAYER" >/dev/null || die "airdrop payer"
 solana -C "$CFG" airdrop 2 "$STRANGER" >/dev/null || die "airdrop stranger"
 spl-token -C "$CFG" create-account "$USDC" --owner "$PAYER" --fee-payer "$PAYER_KEY" >/dev/null || die "payer USDC ATA"
 spl-token -C "$CFG" mint "$USDC" 5 --mint-authority "$PAYER_KEY" --fee-payer "$PAYER_KEY" >/dev/null || die "mint USDC"
+
 
 cli() { (cd "$KEEPER" && RPC_URL="$URL" npx tsx src/cli.ts "$@"); }
 OUT="$WORK/out.txt"
