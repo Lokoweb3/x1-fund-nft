@@ -4,7 +4,7 @@ import { formatUi, parseUi, shellQuote } from "@core/owner.js";
 import { loadFundView, readNativeBalance, type FundView } from "@core/rpc.js";
 import type { AppState } from "../App";
 import { makeProgram, reviewDeposit, reviewEnsureVaults, reviewWithdraw, reviewWithdrawNative, type Review } from "../lib/actions";
-import { exactAvailable, NATIVE_INEXACT_NOTE, nativeBlocker, nativeLine, parseNativeAmount, type AnyNativeBalance } from "../lib/native";
+import { NATIVE_INEXACT_NOTE, nativeForValuation, nativeBlocker, nativeLine, parseNativeAmount, type AnyNativeBalance } from "../lib/native";
 import { withNative } from "../lib/value";
 import { createLatest, sameView, type ViewIdentity } from "../lib/latest";
 import { signerId } from "../lib/session";
@@ -137,8 +137,8 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
   const labels = useTokenLabels(net, view ? [view.account.quoteMint, ...view.account.targets.map((t) => t.mint)] : []);
   // Display only: never passed to a review, a simulation or a transaction.
   const valuation = useValuation(net?.connection, view);
-  // An inexact balance is never priced or totalled.
-  const nativeAvailable = exactAvailable(native?.balance);
+  // An inexact balance is never priced or totalled; it marks the total incomplete.
+  const nativeAvailable = nativeForValuation(native?.balance);
   const holdings = useMemo<ValuationState>(
     () => (valuation.status === "ok" && view ? { status: "ok", valuation: withNative(valuation.valuation, view.account.quoteMint, nativeAvailable) } : valuation),
     [valuation, view, nativeAvailable],

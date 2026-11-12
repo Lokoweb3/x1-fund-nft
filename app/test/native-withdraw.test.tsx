@@ -12,11 +12,12 @@ import type { FundView, InexactNativeBalance, NativeBalance, WithdrawNativeSumma
 import { TOKEN_PROGRAM_ID } from "@core/pool.js";
 import { NativeWithdrawForm } from "../src/components/FundDetail.js";
 import { HoldingsCard } from "../src/components/Holdings.js";
+import { NftCardView } from "../src/components/NftCard.js";
 import { ReviewPanel } from "../src/components/ReviewPanel.js";
 import type { AppState } from "../src/App.js";
 import { withdrawNativeSentences, type Review } from "../src/lib/actions.js";
 import { friendlyError, friendlySim, NATIVE_WITHDRAW_MISSING } from "../src/lib/errors.js";
-import { exactAvailable, NATIVE_NOT_HOLDER, NATIVE_NOTHING, nativeBlocker, nativeLine, parseNativeAmount } from "../src/lib/native.js";
+import { exactAvailable, nativeForValuation, NATIVE_NOT_HOLDER, NATIVE_NOTHING, nativeBlocker, nativeLine, parseNativeAmount } from "../src/lib/native.js";
 import { createLocalTestWallet } from "../src/lib/signer.js";
 import { signerId } from "../src/lib/session.js";
 import { valueHoldings, withNative, WXNT_MINT } from "../src/lib/value.js";
@@ -272,4 +273,33 @@ test("inexact review sentences say the amount was not checked and the program en
       "The program enforces the rent floor: it refuses any amount that would take the fund account below its rent-exempt minimum.",
     "The fund's token vaults, budgets and targets are not touched.",
   ]);
+});
+
+test("inexact native in a WXNT fund: total marked incomplete, unknown marker, native note; nothing computed from approxLamports", () => {
+  const wxnt: MintMeta = { address: new PublicKey(WXNT_MINT), decimals: 9, tokenProgram: TOKEN_PROGRAM_ID, transferFee: undefined };
+  const vaults = [{ mint: wxnt, vault: k(), balance: 1_000_000_000n }];
+  const base = valueHoldings({ quote: wxnt, vaults, pools: {} });
+  assert.equal(base.complete, true);
+  assert.equal(nativeForValuation(inexact), "inexact");
+  assert.equal(nativeForValuation(balance), balance.available);
+  assert.equal(nativeForValuation(undefined), undefined);
+  const v = withNative(base, wxnt.address, nativeForValuation(inexact));
+  assert.equal(v.complete, false);
+  assert.equal(v.total, 1_000_000_000n); // the ~9M XNT is not added
+  assert.deepEqual(v.native, { amount: undefined, inexact: true, value: undefined });
+
+  const view = { quote: wxnt, vaults, account: { quoteMint: wxnt.address }, targets: [] } as unknown as FundView;
+  const labels = { [WXNT_MINT]: { symbol: "WXNT" } } as never;
+  const html = renderToString(<HoldingsCard state={{ status: "ok", valuation: v }} view={view} labels={labels} />);
+  assert.match(html, /≈ <!-- -->1\.00/);
+  assert.match(html, /<span class="stat-unit"> \+ unknown<\/span>/);
+  assert.match(html, /data-testid="holding-native"/);
+  assert.match(html, /too large to read exactly/);
+  assert.match(html, /data-testid="holding-native-note">XNT \(native\): balance too large to value exactly, so it is not in the total\./);
+  assert.doesNotMatch(html, /9,007,199|9007199/);
+  // The NFT card total says "+ unknown" too.
+  const card = renderToString(
+    <NftCardView stored={undefined} picture={{ status: "none" } as never} onAllow={() => {}} holdings={{ status: "ok", valuation: v }} view={view} labels={labels} />,
+  );
+  assert.match(card, /≈ 1\.00 WXNT \+ unknown/);
 });

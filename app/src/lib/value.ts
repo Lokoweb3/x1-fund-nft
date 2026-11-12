@@ -107,8 +107,10 @@ export interface Valuation {
 export const WXNT_MINT = "So11111111111111111111111111111111111111112";
 
 export interface NativeHolding {
-  /** Lamports above the Fund account's rent-exempt minimum (what withdraw_native may move). */
-  amount: bigint;
+  /** Lamports above the Fund account's rent-exempt minimum (what withdraw_native may move); undefined when inexact. */
+  amount: bigint | undefined;
+  /** True when the balance is above 2^53 - 1 lamports and could not be read exactly: never valued. */
+  inexact?: boolean;
   /** Raw quote units: the amount itself when the quote is WXNT (1:1), else undefined (not priced). */
   value: bigint | undefined;
 }
@@ -116,9 +118,12 @@ export interface NativeHolding {
 /**
  * Add the withdrawable native XNT to a valuation, display only. Counted in
  * the total 1:1 when the fund pays with WXNT (same asset); any other quote
- * leaves it unpriced and the total marked incomplete. Nothing when zero.
+ * leaves it unpriced and the total marked incomplete. Nothing when zero or
+ * unknown (not loaded). "inexact" (balance above 2^53 - 1 lamports) is never
+ * computed from: it adds an unvalued row and marks the total incomplete.
  */
-export function withNative(v: Valuation, quote: PublicKey, available: bigint | undefined): Valuation {
+export function withNative(v: Valuation, quote: PublicKey, available: bigint | "inexact" | undefined): Valuation {
+  if (available === "inexact") return { ...v, complete: false, native: { amount: undefined, inexact: true, value: undefined } };
   if (available === undefined || available <= 0n) return v;
   const value = quote.toBase58() === WXNT_MINT ? available : undefined;
   return {

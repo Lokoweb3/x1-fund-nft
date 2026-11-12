@@ -41,6 +41,12 @@ export function exactAvailable(b: AnyNativeBalance | undefined): bigint | undefi
   return b?.exact ? b.available : undefined;
 }
 
+/** What the valuation gets (value.ts withNative): exact available lamports, "inexact", or undefined when not loaded. */
+export function nativeForValuation(b: AnyNativeBalance | undefined): bigint | "inexact" | undefined {
+  if (!b) return undefined;
+  return b.exact ? b.available : "inexact";
+}
+
 /**
  * The amount a native withdraw review is built for: "all", or the XNT
  * decimal input as exact lamports. Refuses empty, zero, more than 9
