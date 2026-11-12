@@ -12,8 +12,8 @@ Review status: independent dual review. The lead and Codex reviewed separately o
 | --- | --- |
 | Program ID | `6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM` (keypair `keys/fund_nft-mainnet.json`, owner-held, gitignored) |
 | Build | `anchor build --ignore-keys --arch v0` with Anchor 1.2.2, Agave 4.1.2, platform-tools v1.57, Rust 1.89.0 |
-| Artifact | `target/deploy/fund_nft.so`, 398,776 bytes, SBPF v0 (ELF e_flags 0), no `sol_get_sysvar` import |
-| sha256 | `8944de68d8dc9da9dc578ad9564ba918c914420f5add2dd791def1a265f04d57` (nft-metadata build on 2026-11-12; rebuild and compare) |
+| Artifact | `target/deploy/fund_nft.so`, 398,960 bytes, SBPF v0 (ELF e_flags 0), no `sol_get_sysvar` import |
+| sha256 | `94a44e059f32c67e06d47a27ecb77fec16a3f00d7552a2b4dd6e0e00e6e28016` (lead build with the NFT supply==1 holder check, 2026-11-12; rebuild and compare) |
 | XDEX program allowed | `sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN` (default build, no `testnet` feature) |
 | Token Metadata allowed | `metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s` (both builds) |
 
@@ -24,7 +24,7 @@ Why v0: X1 mainnet has SBPF v1 and v3 deployment inactive. Anchor 1.2.2 defaults
 ## Cost
 
 Rent on mainnet, read on 2026-11-12:
-- program data, 398,821 bytes: **2.7767 XNT**, locked for the life of the program (was 2.1737 XNT at 312,181 bytes)
+- program data, 399,005 bytes: **2.7780 XNT**, locked for the life of the program (was 2.1737 XNT at 312,181 bytes)
 - program account: 0.0011 XNT
 
 During the deploy a temporary buffer of the same size is also funded. It is refunded when the deploy finishes. Hold about **6 XNT** in the deployer wallet.
@@ -166,7 +166,7 @@ Before the deploy, step 1 fails with `program 6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG1
 - **Upgrade authority.** The deployer key can replace the program, including with code that moves every vault. Before outside users deposit, move it to a multisig, or freeze it (see the freeze section above, which is irreversible).
 - **Token issuers.** The mint-extension allowlist blocks permanent delegates, hooks and similar extensions. It does not remove ordinary issuer power. A mint's freeze authority can freeze a fund's vault, and its mint authority can inflate supply. A Token-2022 transfer-fee authority can change both the fee rate and its maximum-fee cap for future epochs (taking effect two epochs after the change), potentially charging 100% of a transfer. The current fee cap is not a permanent protection. Check these authorities on each mint you put in a fund.
 - **Token programs.** X1 Token-2022 (`TokenzQd…`) is upgradeable, with authority `2sXr5THr5ZAwSfuJAc1KogPKZ2uKkhfNUAtEvNw5Q6Z7` (read on 2026-11-12). Its upgrade key can change how every Token-2022 vault behaves. The program allowlists that ID, not its code. Classic Tokenkeg is frozen (no upgrade authority), and the ATA program is on the non-upgradeable loader.
-- **Token Metadata.** `metaqbxx…` is upgradeable (authority `X1TMEC99KMa4MGEKfcrSJ6HZTiwvPVyrwQczZjuCoLV`, read on 2026-11-12). After `attach_metadata` its edition PDA holds the NFT's mint and freeze authority. Its upgrade key can change the displayed metadata, freeze the NFT (that blocks NFT transfers, not withdrawals), or mint another NFT unit. It never receives a vault or a fund-PDA signature over one. See `ASSUMPTIONS.md` "Design risks".
+- **Token Metadata.** `metaqbxx…` is upgradeable (authority `X1TMEC99KMa4MGEKfcrSJ6HZTiwvPVyrwQczZjuCoLV`, read on 2026-11-12). After `attach_metadata` its edition PDA holds the NFT's mint and freeze authority. Its upgrade key can change the displayed metadata, freeze the NFT (that blocks NFT transfers, not withdrawals), or mint another NFT unit. An extra unit cannot withdraw anything, because every holder action requires the NFT's total supply to be exactly 1, but it would block withdrawals until the extra unit is burned. It never receives a vault or a fund-PDA signature over one. See `ASSUMPTIONS.md` "Design risks".
 - **XDEX.** XDEX's own upgrade authority (`cveZ26DWAWDQb3jUubHmdEM3GxvYt6gqfxdxD2ASNNY` on 2026-11-11) can forge the price observations this program reads. Over successive cranks that could consume every fund's scheduled quote budget. No check in this program removes that risk.
 - **Not an X1 rehearsal.** The integration test runs on Agave 4.1.2 with X1's inactive features turned off, except `X1_SYSVAR_SYSCALL_EXCEPTION`, and with X1's real Token, Token-2022 and ATA programs cloned. That is close to X1 but not X1 itself. The canary is the first run on X1.
 - **Reverse direction.** A fund whose quote mint is token 1 in its pool is covered only by unit tests. Watch its first crank.
