@@ -2,21 +2,30 @@
  * The app's action pipeline, mirroring src/cli.ts:
  *
  *   build the plan (shared planners) -> assertPlanFits -> program deployed?
- *   -> simulate EVERY transaction -> human review -> Sign & send (sendPlan)
+ *   -> simulate EVERY transaction that can be simulated -> human review
+ *   -> Sign & send (sendPlan)
+ *
+ * A transaction marked dependsOnPrevious (attach_metadata after create_fund,
+ * an inscription's appends) needs an account an earlier transaction of the
+ * same plan creates. Like the CLI, it is size-checked here and simulated by
+ * the RPC's preflight when it is sent; the review says so.
  *
  * Every builder, check and the send phase come from keeper/src/core; this
- * file only turns their structured summaries into review rows.
+ * file only turns their structured summaries into review sentences and rows.
  */
 import { AnchorProvider, type Program as ProgramT, type Wallet } from "@anchor-lang/core";
-import { PublicKey, type Transaction, type VersionedTransaction } from "@solana/web3.js";
+import { Keypair, PublicKey, type Transaction, type VersionedTransaction } from "@solana/web3.js";
 import { assertSendAllowed } from "@core/cluster.js";
 import { createProgram } from "@core/fund.js";
 import {
   assertPlanFits,
+  compileTx,
   computeBudgetFromEnv,
   ensureVaultsCommandLine,
   formatUi,
   sendPlan,
+  setMetadataCommandLine,
+  txSize,
   XDEX_PROGRAM_ID,
   type CreateFundArgs,
   type MintMeta,
@@ -29,15 +38,20 @@ import {
   prepareCreateFund,
   prepareDeposit,
   prepareEnsureVaults,
+  prepareSetMetadata,
   prepareWithdraw,
   simulateTx,
   type PlanContext,
   type SimResult,
 } from "@core/rpc.js";
 import { TOKEN_2022_PROGRAM_ID } from "@core/pool.js";
+import { INSCRIPTION_PROGRAM_ID, inscriptionUri, prepareInscribe, prepareInscribeResume, type InscribePlan, type PriorAttempt } from "@core/inscribe.js";
+import type { MetadataFields, MetadataUpdate } from "@core/metadata.js";
 import type { NetworkInfo } from "./network";
 import { assertSession, sessionGuard, signerId, type SessionKey } from "./session";
 import type { AppSigner } from "./signer";
+import { labelFor, type TokenLabel } from "./tokens";
+import { bpsToPercent, humanInterval } from "./wizard";
 
 /** Compute budget for app sends: the keeper/CLI defaults (400k units, price 0). */
 export const BUDGET = computeBudgetFromEnv({});
@@ -67,6 +81,12 @@ export function planContext(net: NetworkInfo, payer: PublicKey): PlanContext {
 
 export type Row = [label: string, value: string];
 
+/** A simulated transaction, or one that cannot be simulated before the previous one lands. */
+export interface ReviewSim extends SimResult {
+  /** True for a transaction that depends on an earlier one of the same plan (preflight-simulated at send). */
+  skipped?: boolean;
+}
+
 export interface Review {
   /** Unique per built review. */
   id: number;
@@ -83,27 +103,38 @@ export interface Review {
   cluster: NetworkInfo["cluster"];
   payer: PublicKey;
   plan: Plan;
+  /** The review in plain sentences. `rows` are the technical details. */
+  sentences: string[];
   rows: Row[];
   warnings: string[];
-  sims: SimResult[];
+  sims: ReviewSim[];
   accounts: ReturnType<typeof planAccounts>;
   simOk: boolean;
   nothingToDo: boolean;
   /** Shown after a successful send (e.g. the new fund PDA and NFT mint). */
   created?: { fund: PublicKey; nftMint: PublicKey };
+  /** For an inscription review: what it writes, so the page can read it back after the send. */
+  inscribe?: { number: bigint; uri: string; content: Uint8Array; contentType: string };
 }
 
 interface Prepared {
   plan: Plan;
   rows: Row[];
+  sentences?: string[];
   warnings?: string[];
   created?: Review["created"];
+  inscribe?: Review["inscribe"];
+}
+
+export interface FinishOptions {
+  /** Which program must be deployed for this plan. Default: the fund program. */
+  program?: "fund" | "inscriptions";
 }
 
 let reviewCounter = 0;
 
-/** Size check, program check, and simulation of every transaction in the plan. */
-export async function finishReview(net: NetworkInfo, payer: PublicKey, title: string, p: Prepared): Promise<Review> {
+/** Size check, program check, and simulation of every transaction that can be simulated now. */
+export async function finishReview(net: NetworkInfo, payer: PublicKey, title: string, p: Prepared, opts: FinishOptions = {}): Promise<Review> {
   const base = {
     id: ++reviewCounter,
     title,
@@ -113,16 +144,96 @@ export async function finishReview(net: NetworkInfo, payer: PublicKey, title: st
     payer,
     plan: p.plan,
     rows: p.rows,
+    sentences: p.sentences ?? [],
     warnings: p.warnings ?? [],
     accounts: planAccounts(p.plan),
     created: p.created,
+    inscribe: p.inscribe,
   };
   if (p.plan.txs.length === 0) return { ...base, sims: [], simOk: false, nothingToDo: true };
   assertPlanFits(payer, p.plan.txs);
-  await assertProgramDeployed(net.connection, net.rpcUrl, net.cluster);
-  const sims: SimResult[] = [];
-  for (const tx of p.plan.txs) sims.push(await simulateTx(net.connection, payer, tx));
-  return { ...base, sims, simOk: sims.every((s) => s.err === null), nothingToDo: false };
+  if (opts.program === "inscriptions") await assertInscriptionsDeployed(net);
+  else await assertProgramDeployed(net.connection, net.rpcUrl, net.cluster);
+  const sims: ReviewSim[] = [];
+  for (const tx of p.plan.txs) {
+    if (tx.dependsOnPrevious) {
+      // Same rule as the CLI: size-checked above, simulated by the RPC's preflight when it is sent.
+      sims.push({
+        label: tx.label,
+        size: txSize(payer, tx.instructions),
+        signers: [payer, ...tx.extraSigners.map((k) => k.publicKey)],
+        logs: [],
+        err: null,
+        unitsConsumed: undefined,
+        skipped: true,
+      });
+      continue;
+    }
+    sims.push(await simulateTx(net.connection, payer, tx));
+  }
+  const fees = await networkFees(net, payer, p.plan);
+  const n = p.plan.txs.length;
+  const sentences =
+    fees === undefined
+      ? base.sentences
+      : [...base.sentences, `Network fees for ${n === 1 ? "this transaction" : `these ${n} transactions`}: about ${xnt(fees)} XNT, as quoted by the RPC.`];
+  return { ...base, sentences, sims, simOk: sims.every((s) => s.err === null), nothingToDo: false };
+}
+
+async function assertInscriptionsDeployed(net: NetworkInfo): Promise<void> {
+  const info = await net.connection.getAccountInfo(INSCRIPTION_PROGRAM_ID);
+  if (!info || !info.executable) {
+    throw new Error(`X1 Inscriptions is not deployed on this RPC (${net.rpcUrl}, ${net.cluster}). Nothing was simulated or sent.`);
+  }
+}
+
+/** Lamports as XNT for display. */
+export function xnt(lamports: bigint | number): string {
+  const v = Number(lamports) / 1e9;
+  if (v > 0 && v < 0.0001) return v.toFixed(6);
+  return v >= 1 ? v.toFixed(3) : v.toFixed(4);
+}
+
+/** Sum of getFeeForMessage over the plan, or undefined if the RPC cannot quote it. */
+async function networkFees(net: NetworkInfo, payer: PublicKey, plan: Plan): Promise<bigint | undefined> {
+  try {
+    const { blockhash } = await net.connection.getLatestBlockhash("confirmed");
+    let total = 0n;
+    for (const tx of plan.txs) {
+      const fee = await net.connection.getFeeForMessage(compileTx(payer, tx, blockhash).message, "confirmed");
+      if (fee.value === null) return undefined;
+      total += BigInt(fee.value);
+    }
+    return total;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function rent(net: NetworkInfo, bytes: number): Promise<bigint> {
+  return BigInt(await net.connection.getMinimumBalanceForRentExemption(bytes, "confirmed"));
+}
+
+/** Token account size for a vault of this mint: 165, or Token-2022's 165 + type byte + ImmutableOwner (+ TransferFeeAmount). */
+function vaultSize(m: MintMeta): number {
+  if (!m.tokenProgram.equals(TOKEN_2022_PROGRAM_ID)) return 165;
+  return 165 + 1 + 4 + (m.transferFee ? 4 + 8 : 0);
+}
+
+/** Fund account size: 8-byte discriminator + Fund::INIT_SPACE (state.rs, up to 8 targets of 82 bytes). */
+export const FUND_ACCOUNT_LEN = 8 + 32 + 32 + 1 + 8 + 8 + 4 + 2 + 4 + 8 * (32 + 32 + 2 + 8 + 8);
+/**
+ * attach_metadata, measured on the cloned Token Metadata (docs/ASSUMPTIONS.md):
+ * a 607-byte metadata account (rent plus Token Metadata's 0.01 XNT fee) and a
+ * 20-byte master edition, about 0.0161 XNT. The program refuses to let
+ * attach_metadata debit the holder more than 0.03 XNT (AttachCostTooHigh).
+ */
+export const METADATA_CREATE_FEE = 10_000_000n;
+export const ATTACH_DEBIT_CAP_LAMPORTS = 30_000_000n;
+export const ATTACH_NOTE = "Attaching the NFT metadata costs about 0.016 XNT; the program refuses more than 0.03 XNT.";
+
+export async function attachCost(net: NetworkInfo): Promise<bigint> {
+  return (await rent(net, 607)) + METADATA_CREATE_FEE + (await rent(net, 20));
 }
 
 function ui(raw: bigint, mint: MintMeta): string {
@@ -144,9 +255,43 @@ function mintNote(m: MintMeta): string {
   return `${m.decimals} decimals, ${prog}${fee}`;
 }
 
-export async function reviewCreateFund(net: NetworkInfo, payer: PublicKey, args: CreateFundArgs): Promise<Review> {
+/** Labels for mints, by base58; falls back to the curated list and the short address. */
+export type Labels = Record<string, TokenLabel | undefined>;
+const sym = (labels: Labels | undefined, mint: PublicKey) => (labels?.[mint.toBase58()] ?? labelFor(mint)).symbol;
+
+/** "and" list: "A", "A and B", "A, B and C". */
+function andList(items: string[]): string {
+  if (items.length <= 1) return items.join("");
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+export interface CreateFundOptions {
+  /** Attach Metaplex metadata as transaction 2. */
+  metadata?: MetadataFields;
+  /** The NFT mint keypair (the wizard picks it first so the fund PDA can go into the metadata JSON). */
+  nft?: Keypair;
+  labels?: Labels;
+}
+
+/** Plain sentences describing a create-fund plan (exported for tests). */
+export function createFundSentences(args: CreateFundArgs, quote: MintMeta, labels: Labels | undefined): string[] {
+  const q = sym(labels, args.quote);
+  const every = humanInterval(args.interval);
+  const buys = args.targets.filter((t) => !t.mint.equals(args.quote));
+  const cash = args.targets.find((t) => t.mint.equals(args.quote));
+  const spend = buys.map((t) => `${formatUi((args.perRun * BigInt(t.bps)) / 10_000n, quote.decimals)} ${q} on ${sym(labels, t.mint)}`);
+  const out = [`Every ${every} this fund spends ${andList(spend)}.`];
+  if (cash) out.push(`It keeps ${bpsToPercent(cash.bps)}% of every deposit as cash in ${q}; that share is never spent.`);
+  out.push(
+    `Each buy goes through its pinned XDEX pool and is refused if it gets more than ${bpsToPercent(args.maxDevBps)}% below the ${humanInterval(args.window)} average price. ` +
+      "0.1% of each buy is a tip for the keeper who runs it.",
+  );
+  return out;
+}
+
+export async function reviewCreateFund(net: NetworkInfo, payer: PublicKey, args: CreateFundArgs, opts: CreateFundOptions = {}): Promise<Review> {
   const ctx = planContext(net, payer);
-  const p = await prepareCreateFund(ctx, args, XDEX_PROGRAM_ID);
+  const p = await prepareCreateFund(ctx, args, XDEX_PROGRAM_ID, opts.metadata, opts.nft);
   const rows: Row[] = [
     ["NFT mint (new, in memory)", p.nft.publicKey.toBase58()],
     ["Fund PDA", p.fund.toBase58()],
@@ -167,21 +312,44 @@ export async function reviewCreateFund(net: NetworkInfo, payer: PublicKey, args:
       `${v.vault.toBase58()} (${v.mint.address.toBase58()}, created idempotently)`,
     ]),
   ];
-  const warnings =
-    p.plan.txs.length > 1
-      ? ["These are separate transactions, not one atomic step. If the second does not land, use Ensure vaults on the fund page."]
-      : [];
+  if (opts.metadata) {
+    rows.push(["NFT name", opts.metadata.name], ["NFT symbol", opts.metadata.symbol], ["NFT metadata uri", opts.metadata.uri]);
+  }
+  const sentences = createFundSentences(args, p.quote, opts.labels);
+  sentences.push("You receive an NFT that owns this fund. Whoever holds it can withdraw the fund's tokens; send or sell the NFT and you hand the fund over.");
+  const rentLamports =
+    (await rent(net, FUND_ACCOUNT_LEN)) + (await rent(net, 82)) + (await rent(net, 165)) + (await Promise.all(p.vaults.map((v) => rent(net, vaultSize(v.mint))))).reduce((a, b) => a + b, 0n);
+  sentences.push(
+    `Rent: about ${xnt(rentLamports)} XNT is set aside in the fund account, the NFT and its account, and ${p.vaults.length} vault${p.vaults.length === 1 ? "" : "s"}. It stays in those accounts.`,
+  );
+  if (opts.metadata) sentences.push(`${ATTACH_NOTE} The NFT shows "${opts.metadata.name}" with the metadata at ${opts.metadata.uri}.`);
+  else sentences.push("The NFT gets no name or picture now. Add them later with \"Set image / edit metadata\" on the fund page.");
+  const warnings: string[] = [];
+  if (p.plan.txs.length > 1) {
+    warnings.push(
+      `These are ${p.plan.txs.length} separate transactions, not one atomic step. If a later one does not land, the fund page can finish the job ` +
+        `(${opts.metadata ? '"Set image / edit metadata" and ' : ""}"Ensure vaults").`,
+    );
+  }
+  if (opts.metadata) {
+    warnings.push(
+      "attach_metadata (tx 2) cannot be simulated in advance: it needs the fund that tx 1 creates. It is size-checked now, and the RPC simulates it (preflight) when it is sent, after tx 1 confirms.",
+    );
+  }
+  const ensure = ensureVaultsCommandLine({ fund: p.fund, payer, rpcUrl: net.rpcUrl, send: false, cluster: undefined, iUnderstandMainnet: false });
+  const setMd = opts.metadata
+    ? `; for the metadata press "Set image / edit metadata" (CLI: ${setMetadataCommandLine({ fund: p.fund, payer, rpcUrl: net.rpcUrl, send: false, cluster: undefined, iUnderstandMainnet: false, fields: opts.metadata })})`
+    : "";
   const plan: Plan = {
     ...p.plan,
-    recovery:
-      `open fund ${p.fund.toBase58()} in this app and press "Ensure vaults"; CLI alternative: ` +
-      ensureVaultsCommandLine({ fund: p.fund, payer, rpcUrl: net.rpcUrl, send: false, cluster: undefined, iUnderstandMainnet: false }),
+    recovery: `open fund ${p.fund.toBase58()} in this app and press "Ensure vaults" (CLI: ${ensure})${setMd}`,
   };
-  return finishReview(net, payer, "Create fund", { plan, rows, warnings, created: { fund: p.fund, nftMint: p.nft.publicKey } });
+  return finishReview(net, payer, "Create fund", { plan, rows, sentences, warnings, created: { fund: p.fund, nftMint: p.nft.publicKey } });
 }
 
-export async function reviewDeposit(net: NetworkInfo, payer: PublicKey, fund: PublicKey, amount: bigint): Promise<Review> {
+export async function reviewDeposit(net: NetworkInfo, payer: PublicKey, fund: PublicKey, amount: bigint, labels?: Labels): Promise<Review> {
   const { plan, summary: s } = await prepareDeposit(planContext(net, payer), fund, amount);
+  const q = sym(labels, s.quote.address);
   const rows: Row[] = [
     ["Fund", s.fund.toBase58()],
     ["Depositor", `${s.depositor.toBase58()} (from ${s.source.toBase58()})`],
@@ -194,7 +362,12 @@ export async function reviewDeposit(net: NetworkInfo, payer: PublicKey, fund: Pu
       `${formatUi(x.share, s.quote.decimals)} (${x.mint.toBase58()}, ${x.bps} bps; pre transfer-fee, approximate)`,
     ]),
   ];
-  return finishReview(net, payer, "Deposit", { plan, rows });
+  const sentences = [
+    `You deposit ${formatUi(s.amount, s.quote.decimals)} ${q} into this fund (your balance is ${formatUi(s.balance, s.quote.decimals)} ${q}).`,
+    `It is split: ${andList(s.split.map((x) => `${formatUi(x.share, s.quote.decimals)} ${x.mint.equals(s.quote.address) ? "kept as cash" : `for ${sym(labels, x.mint)}`}`))}.`,
+  ];
+  if (s.fee > 0n) sentences.push(`The token's transfer fee takes about ${formatUi(s.fee, s.quote.decimals)} ${q} of it on the way in.`);
+  return finishReview(net, payer, "Deposit", { plan, rows, sentences });
 }
 
 export async function reviewWithdraw(
@@ -203,8 +376,10 @@ export async function reviewWithdraw(
   fund: PublicKey,
   mint: PublicKey,
   amount: bigint | "all",
+  labels?: Labels,
 ): Promise<Review> {
   const { plan, summary: s } = await prepareWithdraw(planContext(net, payer), fund, mint, amount);
+  const m = sym(labels, s.mint.address);
   const rows: Row[] = [
     ["Fund", s.fund.toBase58()],
     ["Holder", s.holder.toBase58()],
@@ -215,14 +390,16 @@ export async function reviewWithdraw(
     ["From vault", s.vault.toBase58()],
     ["To", `${s.destination.toBase58()} (holder ATA, created idempotently)`],
   ];
+  const sentences = [`You take ${formatUi(s.amount, s.mint.decimals)} ${m} out of the fund (it holds ${formatUi(s.vaultBalance, s.mint.decimals)} ${m}) into your wallet.`];
+  if (s.fee > 0n) sentences.push(`The token's transfer fee takes about ${formatUi(s.fee, s.mint.decimals)} ${m} on the way out.`);
   const warnings: string[] = [];
   if (s.isQuote) {
     warnings.push(
-      `Quote withdraw: target budgets shrink by the gross ${formatUi(s.amount, s.mint.decimals)}, in proportion to their current size.`,
+      `Taking out the pay-with token shrinks the planned buys: the budgets go down by ${formatUi(s.amount, s.mint.decimals)} in total, in proportion to their size.`,
     );
   }
   if (!s.payerHoldsNft) warnings.push(`${payer.toBase58()} does not hold the fund NFT; the program will reject this.`);
-  return finishReview(net, payer, "Withdraw", { plan, rows, warnings });
+  return finishReview(net, payer, "Withdraw", { plan, rows, sentences, warnings });
 }
 
 export async function reviewEnsureVaults(net: NetworkInfo, payer: PublicKey, fund: PublicKey): Promise<Review> {
@@ -232,10 +409,115 @@ export async function reviewEnsureVaults(net: NetworkInfo, payer: PublicKey, fun
     `${v.vault.toBase58()} ${v.exists ? "exists" : "MISSING"}`,
   ]);
   rows.push(["Result", missing.length === 0 ? `all ${vaults.length} vaults exist; nothing to do` : `creating ${missing.length} missing vault(s)`]);
+  const sentences = [missing.length === 0 ? `All ${vaults.length} vaults exist.` : `This creates ${missing.length} missing vault(s) so the fund can hold every token.`];
   return finishReview(net, payer, "Ensure vaults", {
     plan: { ...plan, recovery: plan.txs.length ? `press "Ensure vaults" again for fund ${fund.toBase58()}` : undefined },
     rows,
+    sentences,
   });
+}
+
+export async function reviewSetMetadata(net: NetworkInfo, payer: PublicKey, fund: PublicKey, update: MetadataUpdate): Promise<Review> {
+  const { plan, summary: s } = await prepareSetMetadata(planContext(net, payer), fund, update);
+  const rows: Row[] = [
+    ["Fund", s.fund.toBase58()],
+    ["NFT mint", s.nftMint.toBase58()],
+    ["Metadata account", s.metadata.toBase58()],
+    ["Mode", s.mode],
+    ["Name", `${s.current?.name ?? "(none)"} -> ${s.next.name}`],
+    ["Symbol", `${s.current?.symbol ?? "(none)"} -> ${s.next.symbol}`],
+    ["Uri", `${s.current?.uri ?? "(none)"} -> ${s.next.uri}`],
+  ];
+  const sentences = [
+    s.mode === "attach"
+      ? `This gives the fund NFT its name "${s.next.name}", symbol ${s.next.symbol} and metadata link ${s.next.uri}.`
+      : `This changes the fund NFT's ${andList(
+          (["name", "symbol", "uri"] as const).filter((k) => update[k] !== undefined && update[k] !== s.current?.[k]).map((k) => (k === "uri" ? "metadata link" : k)),
+        ) || "metadata (no field differs)"}. Only the holder of the NFT can do this.`,
+  ];
+  if (s.mode === "attach") sentences.push(ATTACH_NOTE);
+  const warnings: string[] = [];
+  if (!s.payerHoldsNft) warnings.push(`${payer.toBase58()} does not hold the fund NFT; the program will reject this.`);
+  return finishReview(net, payer, "Set metadata", { plan: { ...plan, recovery: `press "Set image / edit metadata" again for fund ${fund.toBase58()}` }, rows, sentences, warnings });
+}
+
+/** Plain sentences for an inscription plan (exported for tests). */
+export function inscribeSentences(p: InscribePlan, bytes: number, rentLamports: bigint, fees?: bigint): string[] {
+  return [
+    `This stores your ${bytes}-byte metadata JSON on X1 as inscription #${p.number} (predicted; the program picks the number when transaction 1 lands).`,
+    `It takes ${p.txs.length} transaction${p.txs.length === 1 ? "" : "s"}. The X1 Inscriptions fee is ${xnt(p.fee)} XNT, plus about ${xnt(rentLamports)} XNT rent kept in the inscription and its NFT${
+      fees === undefined ? "" : `, about ${xnt(p.fee + rentLamports + fees)} XNT in total with network fees`
+    }.`,
+    `Your fund NFT's metadata link will be ${p.uri}.`,
+    "X1 Inscriptions is a third-party, upgradeable program, and its gateway is an off-chain website. The bytes stay on chain, but wallets follow the link, so the picture is only as available as that site.",
+  ];
+}
+
+/** Rent the payer leaves in a new inscription: the account (212-byte header + content) and its Core asset (588 bytes, plus Core's 0.0015 XNT fee). */
+export async function inscriptionRent(net: NetworkInfo, bytes: number): Promise<bigint> {
+  return (await rent(net, 212 + bytes)) + (await rent(net, 588)) + 1_500_000n;
+}
+
+export async function reviewInscribe(net: NetworkInfo, payer: PublicKey, content: Uint8Array, maxFee: bigint): Promise<Review> {
+  const p = await prepareInscribe(net.connection, { payer, content, contentType: "application/json", maxFee });
+  const rentLamports = await inscriptionRent(net, content.length);
+  const rows: Row[] = [
+    ["Program", INSCRIPTION_PROGRAM_ID.toBase58()],
+    ["Predicted number", `#${p.number}`],
+    ["Inscription account", p.inscription.toBase58()],
+    ["Inscription NFT (Core asset)", p.asset.toBase58()],
+    ["Fee (max_fee sent)", `${p.fee} lamports`],
+    ["Your max fee", `${maxFee} lamports`],
+    ["Chunks", p.chunks.join(" + ")],
+    ["Transaction sizes", p.sizes.join(", ")],
+    ["Uri", p.uri],
+  ];
+  const warnings = [
+    "If someone else inscribes first, transaction 1 fails before it lands (the predicted number is taken) and nothing is charged; build the review again.",
+  ];
+  if (p.txs.length > 1) {
+    warnings.push(
+      `Transactions 2-${p.txs.length} cannot be simulated in advance: each needs the bytes the previous one wrote. The RPC simulates each (preflight) when it is sent. If one does not land, press "Resume" to send only what is missing.`,
+    );
+  }
+  const plan: Plan = { ...p, recovery: `press "Resume" in the NFT image step for inscription #${p.number}` };
+  const r = await finishReview(
+    net,
+    payer,
+    "Inscribe metadata",
+    { plan, rows, sentences: inscribeSentences(p, content.length, rentLamports), warnings, inscribe: { number: p.number, uri: p.uri, content, contentType: "application/json" } },
+    { program: "inscriptions" },
+  );
+  return r;
+}
+
+/**
+ * Resume an inscription. `priorAttempts` is every earlier transaction of this
+ * upload that was signed and may have been submitted; the shared planner
+ * refuses ("not resuming yet") until each is confirmed or expired, and only
+ * then reads the account.
+ */
+export async function reviewInscribeResume(
+  net: NetworkInfo,
+  payer: PublicKey,
+  number: bigint,
+  content: Uint8Array,
+  priorAttempts: PriorAttempt[],
+): Promise<Review> {
+  const plan = await prepareInscribeResume(net.connection, { payer, number, content, contentType: "application/json", priorAttempts });
+  const rows: Row[] = plan.txs.map((t, i): Row => [`tx ${i + 1}`, t.label]);
+  return finishReview(
+    net,
+    payer,
+    "Resume inscription",
+    {
+      plan,
+      rows,
+      sentences: [`This finishes inscription #${number}: it re-read what is already on chain and sends only the missing part (${plan.txs.length} transaction${plan.txs.length === 1 ? "" : "s"}).`],
+      inscribe: { number, uri: inscriptionUri(number), content, contentType: "application/json" },
+    },
+    { program: "inscriptions" },
+  );
 }
 
 /**

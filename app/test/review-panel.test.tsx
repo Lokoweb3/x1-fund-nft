@@ -27,6 +27,7 @@ const review: Review = {
   payer: signer.publicKey,
   plan: { txs: [], fund },
   rows: [],
+  sentences: [],
   warnings: [],
   sims: [{ label: "deposit", size: 300, signers: [signer.publicKey], logs: [], err: null, unitsConsumed: 1 }],
   accounts: [],
@@ -57,6 +58,7 @@ function state(opts: { attempted?: number[]; sends?: SendRecord[]; unresolved?: 
     live: () => live,
     attempted: new Set(opts.attempted ?? []),
     unresolved: opts.unresolved ?? [],
+    switchNetwork: () => {},
   };
 }
 
@@ -74,6 +76,38 @@ test("after its send, with the receipt dismissed, the review has NO send button"
   assert.doesNotMatch(html, /sign-and-send/);
   assert.match(html, /data-testid="review-used"/);
   assert.match(html, /already used for a send/);
+});
+
+test("a create with metadata reads as sentences and says tx 2 is not pre-simulated", () => {
+  const sim = review.sims[0]!;
+  const three: Review = {
+    ...review,
+    id: 43,
+    title: "Create fund",
+    sentences: ["Every 1 hour this fund spends 0.08 USDC.X on TEST."],
+    rows: [["Fund PDA", fund.toBase58()]],
+    sims: [sim, { ...sim, label: "attach_metadata", skipped: true }, { ...sim, label: "target vaults" }],
+  };
+  const html = renderToString(<ReviewPanel s={state({})} review={three} onClose={() => {}} />);
+  assert.match(html, /data-testid="review-sentences"/);
+  assert.match(html, /Every 1 hour this fund spends 0.08 USDC.X on TEST./);
+  assert.match(html, /Technical details \(<!-- -->1<!-- -->\)/);
+  assert.match(html, /not simulated yet/);
+  assert.match(html, /data-testid="sim-skipped"/);
+  assert.match(html, /cannot be simulated in advance/);
+  assert.match(html, /Sign &amp; send<!-- --> \(3 transactions, in order\)/);
+});
+
+test("the NFT image step renders its options without contacting any host", async () => {
+  const { ArtStep } = await import("../src/components/ArtStep.js");
+  const html = renderToString(
+    <ArtStep s={state({})} ctx={{ fund, quote: null, targets: [] }} allowNone onChange={() => {}} />,
+  );
+  for (const text of ["Inscribe on X1", "Host it myself", "Paste a metadata link", "No metadata now", "Compact (fits one inscription transaction)", "An X1"]) {
+    assert.ok(html.includes(text), text);
+  }
+  // No img/video element (and so no request) before an explicit Check.
+  assert.doesNotMatch(html, /<img|<video/);
 });
 
 test("an unknown-status attempt of the same action and fund is shown on a new review", () => {

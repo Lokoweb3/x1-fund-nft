@@ -194,7 +194,7 @@ export interface TokenBalanceReader {
     owner: PublicKey,
     filter: { mint: PublicKey },
     commitment?: "confirmed",
-  ): Promise<{ value: Array<{ pubkey: PublicKey; account: { data: Uint8Array } }> }>;
+  ): Promise<{ value: ReadonlyArray<{ pubkey: PublicKey; account: { data: Uint8Array } }> }>;
 }
 
 /** Sum of every token account `owner` holds for `mint` (raw units). */
