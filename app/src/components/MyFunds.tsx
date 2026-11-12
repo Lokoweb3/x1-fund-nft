@@ -18,7 +18,8 @@ function listKey(generation: number | undefined, rpcUrl: string | undefined, sig
 }
 
 export function MyFunds({ s }: { s: AppState }) {
-  const [funds, setFunds] = useState<{ key: string; list: HeldFund[] } | null>(null);
+  const [funds, setFunds] = useState<{ key: string; list: HeldFund[]; rev: number } | null>(null);
+  const revRef = useRef(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const owner = s.signer?.publicKey ?? null;
@@ -36,7 +37,8 @@ export function MyFunds({ s }: { s: AppState }) {
     try {
       const r = await loads.run(findFundsHeldBy(net.connection, makeProgram(net), owner));
       if (r.stale || keyRef.current !== mine) return;
-      setFunds({ key: mine, list: r.value });
+      // A new revision on every successful load, so Refresh also refetches each value.
+      setFunds({ key: mine, list: r.value, rev: ++revRef.current });
     } catch (err) {
       if (keyRef.current !== mine) return;
       setFunds(null);
@@ -82,7 +84,7 @@ export function MyFunds({ s }: { s: AppState }) {
         {list && list.length > 0 && (
           <ul className="funds" data-testid="my-funds">
             {list.map((f) => (
-              <FundItem key={f.fund.toBase58()} s={s} f={f} />
+              <FundItem key={f.fund.toBase58()} s={s} f={f} rev={funds!.rev} />
             ))}
           </ul>
         )}
@@ -93,7 +95,7 @@ export function MyFunds({ s }: { s: AppState }) {
 }
 
 /** One fund: the NFT's stored name and symbol (read from chain; the uri is shown, never fetched) and what it buys. */
-function FundItem({ s, f }: { s: AppState; f: HeldFund }) {
+function FundItem({ s, f, rev }: { s: AppState; f: HeldFund; rev: number }) {
   const net = s.net;
   const [md, setMd] = useState<{ key: string; stored: StoredMetadata | undefined } | null>(null);
   const key = `${net?.generation}|${f.nftMint.toBase58()}|${s.sendTick}`;
@@ -118,7 +120,7 @@ function FundItem({ s, f }: { s: AppState; f: HeldFund }) {
   const cash = f.account.targets.find((t) => t.mint.equals(f.account.quoteMint));
   return (
     <li data-testid="fund-item">
-      <FundValue s={s} f={f} quoteSymbol={q} />
+      <FundValue s={s} f={f} quoteSymbol={q} rev={rev} />
       <div>
         <strong data-testid="fund-name">{stored ? `${stored.name} (${stored.symbol})` : "Unnamed fund"}</strong>{" "}
         <span className="small">
@@ -143,9 +145,9 @@ function FundItem({ s, f }: { s: AppState; f: HeldFund }) {
 }
 
 /** Estimated value of one listed fund, loaded on its own; a failure shows "value unknown". Display only. */
-function FundValue({ s, f, quoteSymbol }: { s: AppState; f: HeldFund; quoteSymbol: string }) {
+function FundValue({ s, f, quoteSymbol, rev }: { s: AppState; f: HeldFund; quoteSymbol: string; rev: number }) {
   const net = s.net;
-  const key = `${net?.generation}|${f.fund.toBase58()}|${s.sendTick}`;
+  const key = `${net?.generation}|${f.fund.toBase58()}|${s.sendTick}|${rev}`;
   const [st, setSt] = useState<{ key: string; view: FundView; valuation: Valuation } | { key: string; error: true } | null>(null);
   useEffect(() => {
     if (!net) return;

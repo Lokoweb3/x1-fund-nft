@@ -9,7 +9,7 @@
  * units. Transfer fees are NOT subtracted; the page notes them instead.
  */
 import type { Connection, PublicKey } from "@solana/web3.js";
-import type { MintMeta } from "@core/owner.js";
+import { transferFeeFor, type MintMeta } from "@core/owner.js";
 import { readPool } from "@core/pool.js";
 import { tokenAmount, type FundView } from "@core/rpc.js";
 
@@ -82,8 +82,13 @@ export interface HoldingRow {
   balance: bigint | undefined;
   /** Raw quote units; undefined when it cannot be estimated. */
   value: bigint | undefined;
-  /** Current transfer fee in basis points (0 when none). */
+  /**
+   * Transfer fee in basis points in force at the valuation's epoch (0 when
+   * none). Without an epoch, the larger of the mint's two scheduled rates.
+   */
   transferFeeBps: number;
+  /** Fee, in this token's raw units, on withdrawing the whole balance (rate and maximum-fee cap applied). */
+  withdrawFee: bigint;
 }
 
 export interface Valuation {
@@ -101,14 +106,32 @@ export interface ValuationInput {
   vaults: FundView["vaults"];
   /** Target mint (base58) to its pinned pool snapshot, or undefined when unreadable. */
   pools: Record<string, PoolSnapshot | undefined>;
+  /** Current epoch, to pick the transfer-fee schedule in force; undefined = assume the higher of the two. */
+  epoch?: bigint;
 }
 
-export function feeBps(mint: MintMeta): number {
-  return mint.transferFee?.newer.basisPoints ?? 0;
+/** Transfer fee rate in force at `epoch` (same rule as transferFeeFor); without an epoch, the higher scheduled rate. */
+export function feeBps(mint: MintMeta, epoch?: bigint): number {
+  const c = mint.transferFee;
+  if (!c) return 0;
+  if (epoch === undefined) return Math.max(c.older.basisPoints, c.newer.basisPoints);
+  return (epoch >= c.newer.epoch ? c.newer : c.older).basisPoints;
+}
+
+/** Fee on transferring `amount` at `epoch`; without an epoch, the higher of the two schedules. */
+export function withdrawFeeFor(mint: MintMeta, amount: bigint, epoch?: bigint): bigint {
+  const c = mint.transferFee;
+  if (!c || amount === 0n) return 0n;
+  if (epoch !== undefined) return transferFeeFor(c, amount, epoch);
+  // Unknown epoch: the larger of the two schedules, each as transferFeeFor computes it.
+  const only = (f: typeof c.older) => transferFeeFor({ older: f, newer: f }, amount, f.epoch);
+  const x = only(c.older);
+  const y = only(c.newer);
+  return x > y ? x : y;
 }
 
 /** Pure valuation of a fund's vaults. */
-export function valueHoldings({ quote, vaults, pools }: ValuationInput): Valuation {
+export function valueHoldings({ quote, vaults, pools, epoch }: ValuationInput): Valuation {
   let total = 0n;
   let complete = true;
   let quoteBalance: bigint | undefined;
@@ -126,7 +149,14 @@ export function valueHoldings({ quote, vaults, pools }: ValuationInput): Valuati
     }
     if (value === undefined) complete = false;
     else total += value;
-    return { mint: v.mint, isQuote, balance: v.balance, value, transferFeeBps: feeBps(v.mint) };
+    return {
+      mint: v.mint,
+      isQuote,
+      balance: v.balance,
+      value,
+      transferFeeBps: feeBps(v.mint, epoch),
+      withdrawFee: v.balance === undefined ? 0n : withdrawFeeFor(v.mint, v.balance, epoch),
+    };
   });
   return { rows, total, complete, quoteBalance };
 }
@@ -202,6 +232,12 @@ export async function loadPoolSnapshots(connection: Connection, view: FundView):
 }
 
 export async function loadValuation(connection: Connection, view: FundView): Promise<Valuation> {
-  const pools = await loadPoolSnapshots(connection, view);
-  return valueHoldings({ quote: view.quote, vaults: view.vaults, pools });
+  const [pools, epoch] = await Promise.all([
+    loadPoolSnapshots(connection, view),
+    connection.getEpochInfo().then(
+      (e) => BigInt(e.epoch),
+      () => undefined,
+    ),
+  ]);
+  return valueHoldings({ quote: view.quote, vaults: view.vaults, pools, epoch });
 }

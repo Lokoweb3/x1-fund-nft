@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import type { MintMeta } from "@core/owner.js";
 import { POOL_DISCRIMINATOR, POOL_LEN, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@core/pool.js";
-import { formatApprox, netReserve, readPoolFees, sharePercent, valueHoldings, valueInQuote, type PoolSnapshot } from "../src/lib/value.js";
+import { feeBps, formatApprox, netReserve, readPoolFees, sharePercent, valueHoldings, valueInQuote, withdrawFeeFor, type PoolSnapshot } from "../src/lib/value.js";
 
 const k = () => Keypair.generate().publicKey;
 const quoteMint = k();
@@ -113,4 +113,27 @@ test("formatApprox: separators, short fractions, significant digits below 1", ()
   assert.equal(formatApprox(0n, 9), "0");
   assert.equal(formatApprox(12_000_000n, 6), "12");
   assert.equal(formatApprox(7n, 0), "7");
+});
+
+test("transfer-fee note uses the schedule in force at the epoch, and the maximum-fee cap", () => {
+  // Review finding: older 500 bps until epoch 102, then newer 0 bps.
+  const m: MintMeta = {
+    address: k(),
+    decimals: 9,
+    tokenProgram: TOKEN_2022_PROGRAM_ID,
+    transferFee: { older: { epoch: 90n, maximumFee: 10n ** 18n, basisPoints: 500 }, newer: { epoch: 102n, maximumFee: 10n ** 18n, basisPoints: 0 } },
+  };
+  assert.equal(feeBps(m, 100n), 500);
+  assert.equal(feeBps(m, 102n), 0);
+  assert.equal(feeBps(m), 500, "unknown epoch: the higher rate");
+  assert.equal(withdrawFeeFor(m, 1_000n, 100n), 50n);
+  assert.equal(withdrawFeeFor(m, 1_000n, 102n), 0n);
+  assert.equal(withdrawFeeFor(m, 1_000n), 50n);
+  const rows = valueHoldings({ quote: meta(quoteMint, 9), vaults: [{ mint: m, vault: k(), balance: 1_000n }], pools: {}, epoch: 100n }).rows;
+  assert.equal(rows[0]!.transferFeeBps, 500);
+  assert.equal(rows[0]!.withdrawFee, 50n);
+  // Cap: 5% of 1e12 is 5e10, capped at 7.
+  const capped: MintMeta = { ...m, transferFee: { older: { epoch: 0n, maximumFee: 7n, basisPoints: 500 }, newer: { epoch: 0n, maximumFee: 7n, basisPoints: 500 } } };
+  assert.equal(withdrawFeeFor(capped, 10n ** 12n, 5n), 7n);
+  assert.equal(withdrawFeeFor(capped, 0n, 5n), 0n);
 });

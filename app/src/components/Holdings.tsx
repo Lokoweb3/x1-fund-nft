@@ -33,7 +33,7 @@ export function HoldingsCard({ state, view, labels }: { state: ValuationState; v
   const q = symOf(labels, view.account.quoteMint.toBase58());
   const qd = view.quote.decimals;
   const v = state.status === "ok" ? state.valuation : undefined;
-  const fees = v?.rows.filter((r) => r.transferFeeBps > 0 && (r.balance ?? 0n) > 0n) ?? [];
+  const fees = v?.rows.filter((r) => r.withdrawFee > 0n) ?? [];
   return (
     <div className="holdings" data-testid="holdings">
       <div className="stats">
@@ -90,7 +90,8 @@ export function HoldingsCard({ state, view, labels }: { state: ValuationState; v
       )}
       {fees.map((r) => (
         <p key={r.mint.address.toBase58()} className="small warn-text" data-testid="holding-fee-note">
-          {symOf(labels, r.mint.address.toBase58())}: withdrawing pays its {bpsToPercent(r.transferFeeBps)}% transfer fee.
+          {symOf(labels, r.mint.address.toBase58())}: withdrawing pays its {bpsToPercent(r.transferFeeBps)}% transfer fee (about{" "}
+          {formatApprox(r.withdrawFee, r.mint.decimals)} {symOf(labels, r.mint.address.toBase58())} on the whole balance).
         </p>
       ))}
       <p className="small muted">

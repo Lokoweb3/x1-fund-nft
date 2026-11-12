@@ -47,6 +47,7 @@ test("holdings card: total, per-token value, share, transfer-fee note, estimate 
   assert.match(html, /≈ 0.6 WXNT/);
   assert.match(html, /5.7%/);
   assert.match(html, /Test<!-- -->: withdrawing pays its <!-- -->5<!-- -->% transfer fee/);
+  assert.match(html, /about<!-- --> <!-- -->0.05<!-- --> <!-- -->Test<!-- --> on the whole balance/);
   assert.match(html, /Display only/);
   const err = renderToString(<HoldingsCard state={{ status: "error" }} view={view} labels={labels} />);
   assert.match(err, /unknown/);
