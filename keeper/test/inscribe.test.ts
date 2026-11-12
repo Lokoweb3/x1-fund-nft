@@ -34,7 +34,10 @@ import {
   planInscribe,
   planInscribeResume,
   assertAttemptsSettled,
+  DISCRIMINATORS,
+  INSCRIPTION_HEADER_LEN,
   prepareInscribe,
+  prepareInscribeResume,
   thawInscriptionIx,
   type AccountReader,
   type InscriptionAccount,
@@ -401,34 +404,78 @@ test("prepareInscribe: a prefunded, empty, System-owned next PDA is not 'taken' 
   );
 });
 
-function statusReader(statuses: ({ confirmationStatus: string; err: unknown } | null)[], height: number) {
+type Status = { slot: number; confirmationStatus: string; err: unknown } | null;
+
+function statusReader(statuses: Status[], blockHeight: number, bankSlot = 1000, account?: { slot: number; owner: PublicKey; data: Uint8Array } | null) {
+  const calls: { minContextSlot: number }[] = [];
   return {
+    calls,
     async getAccountInfo() {
       return null;
     },
     async getSignatureStatuses() {
       return { value: statuses };
     },
-    async getBlockHeight() {
-      return height;
+    async getEpochInfo() {
+      return { absoluteSlot: bankSlot, blockHeight };
+    },
+    async getAccountInfoAndContext(_a: PublicKey, cfg: { commitment: "confirmed"; minContextSlot: number }) {
+      calls.push({ minContextSlot: cfg.minContextSlot });
+      const a = account ?? null;
+      return { context: { slot: a ? a.slot : bankSlot }, value: a ? { owner: a.owner, data: a.data } : null };
     },
   };
 }
 
 test("resume waits until every earlier attempt is settled (codex r: SF1)", async () => {
   const a = { signature: "sigA", lastValidBlockHeight: 1000 };
-  // Unknown and its blockhash still valid: it can still land, so refuse.
   await assert.rejects(assertAttemptsSettled(statusReader([null], 1000), [a]), /not resuming yet/);
-  await assert.rejects(assertAttemptsSettled(statusReader([{ confirmationStatus: "processed", err: null }], 999), [a]), /not resuming yet/);
-  // Expired blockhash: it can never land.
-  await assertAttemptsSettled(statusReader([null], 1001), [a]);
-  // Confirmed, either succeeded or failed on chain: outcome known.
-  await assertAttemptsSettled(statusReader([{ confirmationStatus: "confirmed", err: null }], 10), [a]);
-  await assertAttemptsSettled(statusReader([{ confirmationStatus: "finalized", err: { InstructionError: [0, "x"] } }], 10), [a]);
-  // Mixed: one settled, one open -> refuse and name the open one.
+  await assert.rejects(assertAttemptsSettled(statusReader([{ slot: 5, confirmationStatus: "processed", err: null }], 999), [a]), /not resuming yet/);
+  // Expired: the floor is the bank slot that proved expiry.
+  assert.equal(await assertAttemptsSettled(statusReader([null], 1001, 2000), [a]), 2000);
+  // Confirmed (success or on-chain failure): the floor covers its execution slot.
+  assert.equal(await assertAttemptsSettled(statusReader([{ slot: 2500, confirmationStatus: "confirmed", err: null }], 10, 2000), [a]), 2500);
+  assert.equal(await assertAttemptsSettled(statusReader([{ slot: 1500, confirmationStatus: "finalized", err: { x: 1 } }], 10, 2000), [a]), 2000);
   await assert.rejects(
-    assertAttemptsSettled(statusReader([{ confirmationStatus: "confirmed", err: null }, null], 5), [a, { signature: "sigB", lastValidBlockHeight: 9 }]),
+    assertAttemptsSettled(statusReader([{ slot: 1, confirmationStatus: "confirmed", err: null }, null], 5), [a, { signature: "sigB", lastValidBlockHeight: 9 }]),
     /sigB/,
   );
-  await assertAttemptsSettled(statusReader([], 0), []);
+  assert.equal(await assertAttemptsSettled(statusReader([], 0, 777), []), 777);
 });
+
+test("resume refuses an account snapshot older than the settlement evidence (codex r2: SF1)", async () => {
+  // An earlier append confirmed at slot 1100; a lagging backend answers with an older 600-byte prefix.
+  const content = json(2400);
+  const n = 67n;
+  const prefix = fixtureInscriptionBytes(content, 600, n);
+  const lagging = statusReader([{ slot: 1100, confirmationStatus: "confirmed", err: null }], 10, 1000, { slot: 1050, owner: INSCRIPTION_PROGRAM_ID, data: prefix });
+  await assert.rejects(
+    prepareInscribeResume(lagging, { payer, number: n, content, contentType: "application/json", priorAttempts: [{ signature: "old", lastValidBlockHeight: 5 }] }),
+    /older than the settlement evidence at slot 1100/,
+  );
+  assert.deepEqual(lagging.calls, [{ minContextSlot: 1100 }]);
+  // The same state served from a current bank plans normally.
+  const current = statusReader([{ slot: 1100, confirmationStatus: "confirmed", err: null }], 10, 1000, { slot: 1100, owner: INSCRIPTION_PROGRAM_ID, data: prefix });
+  const plan = await prepareInscribeResume(current, { payer, number: n, content, contentType: "application/json", priorAttempts: [{ signature: "old", lastValidBlockHeight: 5 }] });
+  assert.ok(plan.txs.length >= 1);
+});
+
+/** Encode an Inscription account (inverse of decodeInscription) holding the first `written` bytes of `content`. */
+function fixtureInscriptionBytes(content: Uint8Array, written: number, n: bigint): Uint8Array {
+  const out = new Uint8Array(INSCRIPTION_HEADER_LEN + written);
+  out.set(DISCRIMINATORS.inscriptionAccount, 0);
+  const v = new DataView(out.buffer);
+  v.setBigUint64(8, n, true);
+  out.set(payer.toBytes(), 16); // owner
+  out.set(payer.toBytes(), 48); // creator
+  const type = new TextEncoder().encode("application/json");
+  out.set(type, 96);
+  out[160] = type.length;
+  v.setUint32(161, content.length, true);
+  v.setUint32(165, written, true);
+  out[169] = written === content.length ? 1 : 0;
+  out[178] = 0; // raw encoding
+  out.set(payer.toBytes(), 179); // writer
+  out.set(content.subarray(0, written), INSCRIPTION_HEADER_LEN);
+  return out;
+}

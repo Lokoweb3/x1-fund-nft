@@ -674,30 +674,45 @@ export interface PriorAttempt {
   lastValidBlockHeight: number;
 }
 
-/** The RPC calls resume needs on top of AccountReader; `Connection` satisfies it. */
+/** The RPC calls resume needs; `Connection` satisfies it. */
 export interface ResumeReader extends AccountReader {
   getSignatureStatuses(
     signatures: string[],
     config: { searchTransactionHistory: boolean },
-  ): Promise<{ value: ({ confirmationStatus?: string | null; err: unknown } | null)[] }>;
-  getBlockHeight(commitment: "confirmed"): Promise<number>;
+  ): Promise<{ value: ({ slot: number; confirmationStatus?: string | null; err: unknown } | null)[] }>;
+  /** One coherent reading of the confirmed bank: its slot and block height together. */
+  getEpochInfo(commitment: "confirmed"): Promise<{ absoluteSlot: number; blockHeight?: number }>;
+  getAccountInfoAndContext(
+    address: PublicKey,
+    config: { commitment: "confirmed"; minContextSlot: number },
+  ): Promise<{ context: { slot: number }; value: { owner: PublicKey; data: Uint8Array } | null }>;
 }
 
 /**
  * Refuse unless every earlier attempt can no longer land: it is confirmed
- * (or finalized), landed and failed, or its blockhash has expired (the
- * cluster's confirmed block height is past its last valid height). Only then
- * is a fresh read of the account safe to plan from.
+ * (or finalized; an on-chain error also counts), or its blockhash has expired
+ * (the confirmed bank's block height is past its last valid height). Returns
+ * the slot the evidence came from: the highest execution slot of a confirmed
+ * attempt, and the bank slot used to prove any expiry. Any account state used
+ * to plan the resume must be read at or after this slot; otherwise a lagging
+ * or load-balanced RPC backend could serve a snapshot from before an earlier
+ * append landed, and the resume would write those bytes again.
  */
-export async function assertAttemptsSettled(connection: ResumeReader, attempts: PriorAttempt[]): Promise<void> {
-  if (attempts.length === 0) return;
+export async function assertAttemptsSettled(connection: ResumeReader, attempts: PriorAttempt[]): Promise<number> {
+  const bank = await connection.getEpochInfo("confirmed");
+  if (bank.blockHeight === undefined) throw new Error("the RPC's getEpochInfo did not report a block height; cannot prove expiry");
+  let floor = bank.absoluteSlot;
+  if (attempts.length === 0) return floor;
   const statuses = (await connection.getSignatureStatuses(attempts.map((a) => a.signature), { searchTransactionHistory: true })).value;
-  const height = await connection.getBlockHeight("confirmed");
   const open: string[] = [];
   attempts.forEach((a, i) => {
     const st = statuses[i];
-    const settled = st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized");
-    if (!settled && height <= a.lastValidBlockHeight) open.push(`${a.signature} (can land until block ${a.lastValidBlockHeight}, now ${height})`);
+    const settled = !!st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized");
+    if (settled) {
+      floor = Math.max(floor, st!.slot);
+    } else if (bank.blockHeight! <= a.lastValidBlockHeight) {
+      open.push(`${a.signature} (can land until block ${a.lastValidBlockHeight}, now ${bank.blockHeight})`);
+    }
   });
   if (open.length > 0) {
     throw new Error(
@@ -705,6 +720,29 @@ export async function assertAttemptsSettled(connection: ResumeReader, attempts: 
         "Wait until it confirms or its blockhash expires (about a minute), then resume. Nothing was simulated or sent.",
     );
   }
+  return floor;
+}
+
+/** Read an inscription from a bank at or after `minContextSlot`, and check the RPC honoured it. */
+export async function fetchInscriptionAtLeast(
+  connection: ResumeReader,
+  n: bigint,
+  minContextSlot: number,
+  programId: PublicKey = INSCRIPTION_PROGRAM_ID,
+): Promise<InscriptionAccount | undefined> {
+  const address = inscriptionPda(n, programId);
+  const res = await connection.getAccountInfoAndContext(address, { commitment: "confirmed", minContextSlot });
+  if (res.context.slot < minContextSlot) {
+    throw new Error(
+      `the RPC answered from slot ${res.context.slot}, older than the settlement evidence at slot ${minContextSlot}; not resuming. Try again. Nothing was simulated or sent.`,
+    );
+  }
+  const info = res.value;
+  if (!info) return undefined;
+  if (!info.owner.equals(programId)) throw new Error(`inscription ${address.toBase58()} is owned by ${info.owner.toBase58()}`);
+  const ins = decodeInscription(info.data);
+  if (ins.number !== n) throw new Error(`inscription account ${address.toBase58()} says #${ins.number}, expected #${n}`);
+  return ins;
 }
 
 export async function prepareInscribeResume(
@@ -721,9 +759,10 @@ export async function prepareInscribeResume(
     priorAttempts: PriorAttempt[];
   },
 ): Promise<Plan> {
-  await assertAttemptsSettled(connection, input.priorAttempts);
-  // Read only after every earlier attempt is settled.
-  const inscription = await fetchInscription(connection, input.number, input.programId);
+  const floor = await assertAttemptsSettled(connection, input.priorAttempts);
+  // Read only after every earlier attempt is settled, from a bank at least as
+  // current as the evidence that settled them.
+  const inscription = await fetchInscriptionAtLeast(connection, input.number, floor, input.programId);
   if (!inscription) throw new Error(`inscription #${input.number} does not exist; its inscribe transaction did not land`);
   return planInscribeResume({ ...input, inscription });
 }
