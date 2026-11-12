@@ -101,20 +101,51 @@ const FALLBACK_LOGS = [
   "Program 6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM failed: custom program error: 0x65",
 ];
 
-test("Anchor 101 on withdraw_native -> 'upgrade the program first'", () => {
+const NATIVE = { action: "withdraw-native" } as const;
+const INSCRIPTIONS = "ins2adbVu5u6TwEfM5AwpBqhhnqekwi3oHaeiuh3c1L";
+const anchorFallback = (program: string) => [
+  `Program ${program} invoke [1]`,
+  "Program log: AnchorError occurred. Error Code: InstructionFallbackNotFound. Error Number: 101. Error Message: Fallback functions are not supported.",
+  `Program ${program} failed: custom program error: 0x65`,
+];
+
+test("Anchor 101 on withdraw_native from the fund program -> 'upgrade the program first'", () => {
   const err = { InstructionError: [1, { Custom: 101 }] };
-  assert.equal(friendlySim({ label: "withdraw_native", err, logs: FALLBACK_LOGS })?.title, NATIVE_WITHDRAW_MISSING);
-  // Without logs, the label and the bare code are enough.
-  assert.equal(friendlySim({ label: "withdraw_native", err, logs: [] })?.title, NATIVE_WITHDRAW_MISSING);
-  assert.equal(friendlyError(new Error(FALLBACK_LOGS[1])).title, NATIVE_WITHDRAW_MISSING);
+  assert.equal(friendlySim({ label: "withdraw_native", err, logs: FALLBACK_LOGS }, NATIVE)?.title, NATIVE_WITHDRAW_MISSING);
+  // Without logs, the native withdraw action and the bare code are enough.
+  assert.equal(friendlySim({ label: "withdraw_native", err, logs: [] }, NATIVE)?.title, NATIVE_WITHDRAW_MISSING);
+  // A send's preflight error for the native withdraw.
+  assert.equal(
+    friendlyError("Transaction simulation failed: Error processing Instruction 1: custom program error: 0x65", NATIVE).title,
+    NATIVE_WITHDRAW_MISSING,
+  );
+  assert.equal(friendlyError(FALLBACK_LOGS.join("\n"), NATIVE).title, NATIVE_WITHDRAW_MISSING);
   assert.equal(
     NATIVE_WITHDRAW_MISSING,
     "This program version has no native withdraw yet. The owner must upgrade the program first (docs/UPGRADE_WITHDRAW_NATIVE.md).",
   );
-  // Another program's own error 101 (e.g. Token Metadata) is not read as a missing instruction.
-  assert.equal(friendlySim({ label: "attach_metadata", err, logs: [] }), undefined);
-  assert.notEqual(friendlyError("attach_metadata failed: custom program error: 0x65").title, NATIVE_WITHDRAW_MISSING);
-  assert.equal(friendlySim({ label: "withdraw_native", err: null, logs: FALLBACK_LOGS }), undefined);
+  assert.equal(friendlySim({ label: "withdraw_native", err: null, logs: FALLBACK_LOGS }, NATIVE), undefined);
+});
+
+test("a fallback/101 error is NOT read as a missing native withdraw outside that action or program", () => {
+  const err = { InstructionError: [1, { Custom: 101 }] };
+  const notMissing = (f: { title: string } | undefined) => assert.notEqual(f?.title, NATIVE_WITHDRAW_MISSING);
+  // Other actions, even with the fund program's own fallback error.
+  notMissing(friendlySim({ label: "create_fund + quote vault", err, logs: FALLBACK_LOGS }));
+  notMissing(friendlySim({ label: "inscribe", err, logs: anchorFallback(INSCRIPTIONS) }));
+  notMissing(friendlySim({ label: "attach_metadata", err, logs: [] }));
+  notMissing(friendlyError(new Error(FALLBACK_LOGS[1])));
+  notMissing(friendlyError("attach_metadata failed: custom program error: 0x65"));
+  // The native withdraw action, but another program failed (inscriptions, Token Metadata).
+  notMissing(friendlySim({ label: "withdraw_native", err, logs: anchorFallback(INSCRIPTIONS) }, NATIVE));
+  notMissing(
+    friendlySim(
+      { label: "withdraw_native", err, logs: ["Program metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s invoke [1]", "Program metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s failed: custom program error: 0x65"] },
+      NATIVE,
+    ),
+  );
+  // The named form with no failing-program line and no fund program id.
+  notMissing(friendlyError("Error Code: InstructionFallbackNotFound. Error Number: 101.", NATIVE));
 });
 
 test("6054 NativeAboveAvailable -> plain words, nothing changed", () => {
@@ -150,6 +181,7 @@ test("review panel: an old program's failed simulation shows the upgrade message
   const review: Review = {
     id: 7,
     title: "Withdraw native XNT",
+    action: "withdraw-native",
     generation: 1,
     signerEpoch: 3,
     rpcUrl: LOCAL,

@@ -277,6 +277,7 @@ function Shell() {
       lines: [],
       outcomes: [],
       created: review.created,
+      action: review.action,
       total: review.sims.length,
     };
     setSends((rs) => [record, ...rs]);

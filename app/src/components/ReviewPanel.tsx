@@ -108,7 +108,7 @@ export function ReviewPanel({ s, review, onClose }: { s: AppState; review: Revie
                 </span>
               </div>
               {(() => {
-                const f = friendlySim(sim);
+                const f = friendlySim(sim, { action: review.action });
                 return (
                   f && (
                     <p className="error small" data-testid="sim-friendly">

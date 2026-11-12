@@ -49,6 +49,7 @@ import {
 import { TOKEN_2022_PROGRAM_ID } from "@core/pool.js";
 import { FIRST_CHUNK_MAX, INSCRIPTION_PROGRAM_ID, prepareInscribe, type InscribePlan } from "@core/inscribe.js";
 import type { MetadataFields, MetadataUpdate } from "@core/metadata.js";
+import type { FailingAction } from "./errors";
 import type { NetworkInfo } from "./network";
 import { assertSession, sessionGuard, signerId, type SessionKey } from "./session";
 import type { AppSigner } from "./signer";
@@ -115,6 +116,8 @@ export interface Review {
   nothingToDo: boolean;
   /** Shown after a successful send (e.g. the new fund PDA and NFT mint). */
   created?: { fund: PublicKey; nftMint: PublicKey };
+  /** Set by the native withdraw review: its errors read "upgrade first" for Anchor 101 (lib/errors.ts). */
+  action?: FailingAction;
   /** For an inscription review: what it writes, so the page can read it back after the send. */
   inscribe?: {
     number: bigint;
@@ -131,6 +134,7 @@ interface Prepared {
   warnings?: string[];
   created?: Review["created"];
   inscribe?: Review["inscribe"];
+  action?: Review["action"];
 }
 
 export interface FinishOptions {
@@ -156,6 +160,7 @@ export async function finishReview(net: NetworkInfo, payer: PublicKey, title: st
     accounts: planAccounts(p.plan),
     created: p.created,
     inscribe: p.inscribe,
+    action: p.action,
   };
   if (p.plan.txs.length === 0) return { ...base, sims: [], simOk: false, nothingToDo: true };
   assertPlanFits(payer, p.plan.txs);
@@ -453,7 +458,7 @@ export async function reviewWithdrawNative(net: NetworkInfo, payer: PublicKey, f
   const warnings: string[] = [];
   if (!b.exact) warnings.push("The amount was not checked against the fund's balance in the app; the program refuses it if it would break the rent floor.");
   if (!s.payerHoldsNft) warnings.push(`${payer.toBase58()} does not hold the fund NFT; the program will reject this.`);
-  return finishReview(net, payer, "Withdraw native XNT", { plan, rows, sentences: withdrawNativeSentences(s), warnings });
+  return finishReview(net, payer, "Withdraw native XNT", { plan, rows, sentences: withdrawNativeSentences(s), warnings, action: "withdraw-native" });
 }
 
 export async function reviewEnsureVaults(net: NetworkInfo, payer: PublicKey, fund: PublicKey): Promise<Review> {

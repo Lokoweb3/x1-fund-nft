@@ -3,6 +3,8 @@
  * text kept for the technical details. Matching is on the shared core's own
  * error text, so the CLI and the app stay in step.
  */
+import { PROGRAM_ID } from "@core/owner.js";
+
 export type ErrorAction = "switch-local" | "connect-wallet" | "fewer-tokens" | "change-token" | "add-funds";
 
 export interface Friendly {
@@ -80,22 +82,37 @@ function refusedOnChain(sc: SendScope | undefined, raw: string, what: string): s
 export const NATIVE_WITHDRAW_MISSING =
   "This program version has no native withdraw yet. The owner must upgrade the program first (docs/UPGRADE_WITHDRAW_NATIVE.md).";
 
+/** The action an error came from, when the message depends on it. */
+export type FailingAction = "withdraw-native";
+
 /**
  * Anchor error 101 (InstructionFallbackNotFound): the deployed program has no
  * handler for the instruction. Of the app's instructions only withdraw_native
- * is newer than the first mainnet build, so this means "upgrade first". A
- * bare custom error 101 is matched only next to withdraw_native, because
- * other programs (e.g. Token Metadata) have their own error 101.
+ * is newer than the first mainnet build, so this means "upgrade first", but
+ * ONLY for the native withdraw action and only when the program that failed
+ * is the fund program: inscriptions, Token Metadata, Core and others have
+ * their own 101s, and a fallback error from create_fund or another action
+ * is not about native withdraw. When the text names failing programs
+ * ("Program X failed"), the fund program must be one of them. Without such a
+ * line, the named form must mention the fund program id; a bare code
+ * (Custom 101 / 0x65) is accepted, because the native withdraw transaction
+ * holds only the compute budget instructions and withdraw_native.
  */
-function isFallbackNotFound(raw: string): boolean {
-  if (/InstructionFallbackNotFound/.test(raw)) return true;
-  return /withdraw_native|withdrawNative|withdraw-native/.test(raw) && /"Custom":101\b|custom program error: 0x65\b|Error Number: 101\./.test(raw);
+function isFallbackNotFound(raw: string, action: FailingAction | undefined): boolean {
+  if (action !== "withdraw-native") return false;
+  const named = /InstructionFallbackNotFound/.test(raw);
+  const bare = /"Custom":101\b|custom program error: 0x65\b|Error Number: 101\./.test(raw);
+  if (!named && !bare) return false;
+  const fund = PROGRAM_ID.toBase58();
+  const failed = [...raw.matchAll(/Program ([1-9A-HJ-NP-Za-km-z]{32,44}) failed/g)].map((m) => m[1]);
+  if (failed.length > 0) return failed.includes(fund);
+  return named ? raw.includes(fund) : true;
 }
 
-export function friendlyError(err: unknown, opts: { cluster?: string; send?: SendScope } = {}): Friendly {
+export function friendlyError(err: unknown, opts: { cluster?: string; send?: SendScope; action?: FailingAction } = {}): Friendly {
   const raw = errText(err);
   const sc = scopeOf(err, opts.send);
-  if (isFallbackNotFound(raw)) return { title: NATIVE_WITHDRAW_MISSING, raw };
+  if (isFallbackNotFound(raw, opts.action)) return { title: NATIVE_WITHDRAW_MISSING, raw };
   if (/NativeAboveAvailable|0x17a6\b|"Custom":6054\b/.test(raw)) {
     return {
       title: refusedOnChain(
@@ -160,13 +177,13 @@ export function friendlyError(err: unknown, opts: { cluster?: string; send?: Sen
 }
 
 /**
- * A friendly reading of a failed simulation (error plus logs, with the
- * transaction label so a withdraw_native fallback error is recognised), or
- * undefined when no mapping applies and the raw status is the best text.
+ * A friendly reading of a failed simulation (error plus logs), or undefined
+ * when no mapping applies and the raw status is the best text. `action` is
+ * the review's action (see FailingAction).
  */
-export function friendlySim(sim: { label: string; err: unknown; logs: string[] }): Friendly | undefined {
+export function friendlySim(sim: { label: string; err: unknown; logs: string[] }, opts: { action?: FailingAction } = {}): Friendly | undefined {
   if (sim.err === null || sim.err === undefined) return undefined;
   const raw = [`${sim.label}: simulation failed ${JSON.stringify(sim.err)}`, ...sim.logs].join("\n");
-  const f = friendlyError(raw);
+  const f = friendlyError(raw, { action: opts.action });
   return f.title === raw.split("\n")[0] ? undefined : f;
 }

@@ -2,7 +2,7 @@ import type { Cluster, DetectedCluster } from "@core/cluster.js";
 import type { TxOutcome } from "@core/owner.js";
 import type { PublicKey } from "@solana/web3.js";
 import { SigLink } from "./ui";
-import { friendlyError } from "../lib/errors";
+import { friendlyError, type FailingAction } from "../lib/errors";
 
 /** One send, kept in app state (it survives navigation) until dismissed. */
 export interface SendRecord {
@@ -18,6 +18,8 @@ export interface SendRecord {
   error?: string;
   failedSig?: string;
   failState?: string;
+  /** The review's action, for action-specific error messages (lib/errors.ts). */
+  action?: FailingAction;
   /** Index of the transaction that did not confirm (PlanSendError.failedIndex). */
   failedIndex?: number;
   /** For a failed tx that may have been submitted: the last block height it can land at. */
@@ -45,7 +47,7 @@ export function SendLog({
       {sends.map((r) => {
         // Scoped to this send: what confirmed before the failure, and what was never sent.
         const friendly = r.error
-          ? friendlyError(r.error, r.failedIndex === undefined ? {} : { send: { done: r.outcomes, failedIndex: r.failedIndex, total: r.total } }).title
+          ? friendlyError(r.error, r.failedIndex === undefined ? { action: r.action } : { action: r.action, send: { done: r.outcomes, failedIndex: r.failedIndex, total: r.total } }).title
           : undefined;
         return (
         <div key={r.id} className={`send ${r.status}`} data-testid="send-record" data-status={r.status}>
