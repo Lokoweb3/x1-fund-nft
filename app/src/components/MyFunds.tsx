@@ -46,7 +46,7 @@ export function MyFunds({ s }: { s: AppState }) {
           <ul className="funds" data-testid="my-funds">
             {funds.map((f) => (
               <li key={f.fund.toBase58()}>
-                <button className="link mono" onClick={() => s.go({ name: "fund", fund: f.fund.toBase58() })} data-testid="fund-link">
+                <button className="link mono" disabled={s.sendPending} onClick={() => s.go({ name: "fund", fund: f.fund.toBase58() })} data-testid="fund-link">
                   {f.fund.toBase58()}
                 </button>
                 <span className="small muted">
@@ -95,7 +95,7 @@ function Lookup({ s }: { s: AppState }) {
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && void open()}
         />
-        <button onClick={() => void open()} disabled={!value.trim()}>
+        <button onClick={() => void open()} disabled={!value.trim() || s.sendPending}>
           Open
         </button>
       </div>

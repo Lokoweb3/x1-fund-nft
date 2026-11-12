@@ -595,7 +595,15 @@ export class PlanSendError extends Error {
  * what was simulated. Stage 2 (submission) is "not sent" only for a JSON-RPC
  * error response; any other exception is "unknown", with the signature to
  * check before retrying.
+ *
+ * `guard`, when given, runs before EACH signature and again before EACH
+ * broadcast. If it throws, that transaction and every later one are reported
+ * "not sent" (nothing of it left this process); transactions already
+ * submitted keep their honest status. The web app uses it to stop when the
+ * network, signer or mainnet acknowledgement changed mid-send.
  */
+export type SendGuard = (step: { index: number; stage: "sign" | "broadcast" }) => void;
+
 export async function sendPlan(input: {
   connection: SendConnection;
   plan: Plan;
@@ -606,6 +614,7 @@ export async function sendPlan(input: {
   sign?: TxSigner;
   rpcUrl: string;
   log?: (line: string) => void;
+  guard?: SendGuard;
 }): Promise<TxOutcome[]> {
   const { connection, plan, payer, rpcUrl } = input;
   const sign = input.sign ?? keypairSigner(input.signers ?? []);
@@ -623,6 +632,7 @@ export async function sendPlan(input: {
       ({ blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed"));
       const unsigned = compileTx(payer, tx, blockhash);
       const message = unsigned.message.serialize();
+      input.guard?.({ index: i, stage: "sign" });
       vtx = await sign(unsigned);
       if (!bytesEqual(vtx.message.serialize(), message)) {
         throw new Error("the signer changed the transaction message; refusing to send what was not simulated");
@@ -634,6 +644,12 @@ export async function sendPlan(input: {
       signature = signatureOf(vtx);
     } catch (err) {
       throw fail(i, `could not be prepared (blockhash/compile/sign): ${errText(err)}`, "not sent");
+    }
+    try {
+      // The wallet may have taken a while; re-check before anything leaves.
+      input.guard?.({ index: i, stage: "broadcast" });
+    } catch (err) {
+      throw fail(i, `${signature} was signed but not broadcast: ${errText(err)}`, "not sent", signature);
     }
     try {
       await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false });

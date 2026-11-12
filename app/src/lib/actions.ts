@@ -36,6 +36,7 @@ import {
 } from "@core/rpc.js";
 import { TOKEN_2022_PROGRAM_ID } from "@core/pool.js";
 import type { NetworkInfo } from "./network";
+import { assertSession, sessionGuard, signerId, type SessionKey } from "./session";
 import type { AppSigner } from "./signer";
 
 /** Compute budget for app sends: the keeper/CLI defaults (400k units, price 0). */
@@ -67,7 +68,11 @@ export function planContext(net: NetworkInfo, payer: PublicKey): PlanContext {
 export type Row = [label: string, value: string];
 
 export interface Review {
+  /** Unique per built review. */
+  id: number;
   title: string;
+  /** Network generation the review was built and simulated under. */
+  generation: number;
   rpcUrl: string;
   cluster: NetworkInfo["cluster"];
   payer: PublicKey;
@@ -89,10 +94,14 @@ interface Prepared {
   created?: Review["created"];
 }
 
+let reviewCounter = 0;
+
 /** Size check, program check, and simulation of every transaction in the plan. */
 export async function finishReview(net: NetworkInfo, payer: PublicKey, title: string, p: Prepared): Promise<Review> {
   const base = {
+    id: ++reviewCounter,
     title,
+    generation: net.generation,
     rpcUrl: net.rpcUrl,
     cluster: net.cluster,
     payer,
@@ -226,17 +235,26 @@ export async function reviewEnsureVaults(net: NetworkInfo, payer: PublicKey, fun
 /**
  * Re-check the chain, then hand the reviewed plan to the shared sendPlan with
  * the signer's TxSigner. Throws (and sends nothing) unless every gate passes.
+ *
+ * `getLive` returns the app's live session. It must still match the session
+ * the review was built under (network generation, RPC, cluster, signer, and
+ * on mainnet the acknowledgement) after the genesis re-check, before EACH
+ * signature and before EACH broadcast; otherwise the remaining transactions
+ * are reported "not sent". Already-submitted transactions keep their status.
  */
 export async function signAndSend(input: {
   net: NetworkInfo;
   review: Review;
   signer: AppSigner;
   mainnetAck: boolean;
+  getLive: () => SessionKey;
   log?: (line: string) => void;
 }): Promise<TxOutcome[]> {
   const { net, review, signer } = input;
   if (!review.simOk) throw new Error("every simulation must pass before sending");
-  if (review.rpcUrl !== net.rpcUrl) throw new Error("the RPC changed since this review was built; build it again");
+  if (review.rpcUrl !== net.rpcUrl || review.generation !== net.generation) {
+    throw new Error("the network changed since this review was built; build it again");
+  }
   if (!signer.publicKey.equals(review.payer)) {
     throw new Error(`the active signer ${signer.publicKey.toBase58()} is not the payer this review was built for; build it again`);
   }
@@ -245,10 +263,20 @@ export async function signAndSend(input: {
   if (net.cluster === "mainnet" && !input.mainnetAck) {
     throw new Error('refusing to send to X1 mainnet: tick "I understand this is X1 mainnet and uses real funds" first');
   }
+  const expected: SessionKey = {
+    generation: review.generation,
+    rpcUrl: review.rpcUrl,
+    cluster: review.cluster,
+    signerId: signerId(signer),
+    mainnetAck: input.mainnetAck,
+  };
+  assertSession(expected, input.getLive());
   // Same guard as the CLI: the genesis hash, fetched again now, must still be
   // the cluster this session detected.
   const genesisHash = await net.connection.getGenesisHash();
   assertSendAllowed({ clusterFlag: net.cluster, genesisHash, iUnderstandMainnet: input.mainnetAck, rpcUrl: net.rpcUrl });
+  // The genesis call may have been slow; the session must still be the same.
+  assertSession(expected, input.getLive());
   return sendPlan({
     connection: net.connection,
     plan: review.plan,
@@ -256,5 +284,6 @@ export async function signAndSend(input: {
     sign: signer.sign,
     rpcUrl: net.rpcUrl,
     log: input.log ?? (() => {}),
+    guard: sessionGuard(expected, input.getLive),
   });
 }

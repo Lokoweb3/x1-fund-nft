@@ -49,7 +49,8 @@ async function signAndSend(page: Page) {
   await expect(review.getByTestId("sim-status").first()).toBeVisible();
   for (const status of await review.getByTestId("sim-status").all()) await expect(status).toHaveText("simulation ok");
   await review.getByTestId("sign-and-send").click();
-  await expect(review.getByTestId("send-ok")).toBeVisible();
+  // The receipt lives in the app-level Transactions panel (newest first).
+  await expect(page.getByTestId("send-record").first()).toHaveAttribute("data-status", "done");
 }
 
 /** Full-page screenshot when SCREENSHOT_DIR is set (manual layout review only). */
@@ -125,8 +126,8 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   await expect(page.getByTestId("sim")).toHaveCount(2);
   await shot(page, "flow-create-review");
   await signAndSend(page);
-  const fund = (await page.getByTestId("created-fund").textContent())!.trim();
-  const nft = (await page.getByTestId("created-nft").textContent())!.trim();
+  const fund = (await page.getByTestId("created-fund").first().textContent())!.trim();
+  const nft = (await page.getByTestId("created-nft").first().textContent())!.trim();
   expect(fund).toMatch(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
 
   // My funds lists it.
@@ -158,6 +159,44 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   await page.getByTestId("ensure-vaults").click();
   await expect(page.getByTestId("nothing-to-do")).toBeVisible();
   await expect(page.getByTestId("sign-and-send")).toHaveCount(0);
+
+  // A pending send locks the context: the test wallet keeps its "prompt"
+  // open for 4 s. Network, navigation, closing the review, new reviews and
+  // discarding the signer are all blocked until it settles.
+  await page.evaluate(() => {
+    (window as unknown as { __FUND_NFT_TEST_WALLET_DELAY_MS: number }).__FUND_NFT_TEST_WALLET_DELAY_MS = 4000;
+  });
+  await page.getByLabel("Deposit amount").fill("0.5");
+  await page.getByTestId("deposit-review").click();
+  await expect(page.getByTestId("review").getByTestId("sim-status")).toHaveText("simulation ok");
+  await page.getByTestId("review").getByTestId("sign-and-send").click();
+  const pending = page.getByTestId("send-record").first();
+  await expect(pending).toHaveAttribute("data-status", "pending");
+  await expect(page.getByTestId("send-lock")).toBeVisible();
+  await expect(page.getByLabel("Network")).toBeDisabled();
+  await expect(page.getByLabel("Local port")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Connect" })).toBeDisabled();
+  for (const tab of ["My funds", "Create fund", "Settings"]) {
+    await expect(page.getByRole("button", { name: tab, exact: true })).toBeDisabled();
+  }
+  await expect(page.getByTestId("close-review")).toBeDisabled();
+  await expect(page.getByTestId("ensure-vaults")).toBeDisabled();
+  await expect(page.getByTestId("deposit-review")).toBeDisabled();
+  await expect(page.getByTestId("drop-test-wallet")).toBeDisabled();
+  await expect(page.getByTestId("dismiss-send")).toHaveCount(3, { timeout: 1000 }); // create, deposit, withdraw; not the pending one
+  await expect(pending).toHaveAttribute("data-status", "done");
+  await page.evaluate(() => {
+    (window as unknown as { __FUND_NFT_TEST_WALLET_DELAY_MS: number }).__FUND_NFT_TEST_WALLET_DELAY_MS = 0;
+  });
+  expect(await budgets(page)).toEqual(["280000", "1120000"]);
+  // The receipt survives navigation and stays until dismissed.
+  await page.getByRole("button", { name: "Create fund", exact: true }).click();
+  await page.getByRole("button", { name: "My funds", exact: true }).click();
+  await expect(page.getByTestId("send-record").first()).toHaveAttribute("data-status", "done");
+  await expect(page.getByTestId("send-record").first()).toContainText("Deposit");
+  const before = await page.getByTestId("send-record").count();
+  await page.getByTestId("send-record").first().getByTestId("dismiss-send").click();
+  await expect(page.getByTestId("send-record")).toHaveCount(before - 1);
 
   // Switch to X1 mainnet: the test wallet disappears with no way back.
   await connectTo(page, "mainnet");

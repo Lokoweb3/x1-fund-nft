@@ -197,3 +197,70 @@ test("src/core is browser-safe: no node: imports, no process, no createRequire",
     assert.doesNotMatch(src, /from "node:|require\(|createRequire|process\./, f);
   }
 });
+
+test("sendPlan guard: a context change between transactions stops the rest as 'not sent'", async () => {
+  const c = conn();
+  let live = true;
+  await assert.rejects(
+    sendPlan({
+      connection: c,
+      plan: plan(false),
+      payer: payer.publicKey,
+      sign: keypairSigner([payer]),
+      rpcUrl: "x",
+      log: () => {
+        live = false; // the network changes right after tx 1 confirmed
+      },
+      guard: () => {
+        if (!live) throw new Error("session changed");
+      },
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof PlanSendError);
+      assert.equal(err.state, "not sent");
+      assert.equal(err.failedIndex, 1);
+      assert.equal(err.done.length, 1, "tx 1 stays reported as confirmed");
+      assert.match(err.message, /session changed/);
+      assert.match(err.message, /not sent: tx 2\/2 \(second\)/);
+      return true;
+    },
+  );
+  assert.equal(c.raw.length, 1, "only tx 1 was submitted");
+});
+
+test("sendPlan guard: a change while the wallet is open stops before broadcast", async () => {
+  const c = conn();
+  let live = true;
+  const slowWallet: TxSigner = async (tx) => {
+    await new Promise((r) => setTimeout(r, 20));
+    live = false; // e.g. the user switched account while the prompt was open
+    tx.sign([payer]);
+    return tx;
+  };
+  const stages: string[] = [];
+  await assert.rejects(
+    sendPlan({
+      connection: c,
+      plan: plan(false),
+      payer: payer.publicKey,
+      sign: slowWallet,
+      rpcUrl: "x",
+      log: quiet,
+      guard: ({ stage }) => {
+        stages.push(stage);
+        if (!live) throw new Error("session changed");
+      },
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof PlanSendError);
+      assert.equal(err.state, "not sent");
+      assert.equal(err.failedIndex, 0);
+      assert.ok(err.signature, "the signed-but-unsent signature is named");
+      assert.match(err.message, /was signed but not broadcast: session changed/);
+      assert.match(err.message, /not sent: tx 1\/2 \(first\), tx 2\/2 \(second\)/);
+      return true;
+    },
+  );
+  assert.deepEqual(stages, ["sign", "broadcast"]);
+  assert.equal(c.raw.length, 0, "nothing was submitted");
+});

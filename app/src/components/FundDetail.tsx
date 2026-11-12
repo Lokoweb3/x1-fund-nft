@@ -46,9 +46,15 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
     return () => clearInterval(id);
   }, [load]);
 
+  // Refresh after a send finishes (its receipt stays under Transactions).
+  useEffect(() => {
+    if (s.sendTick > 0) void load();
+  }, [s.sendTick, load]);
+
   const payer = s.signer?.publicKey;
 
   const run = async (name: string, build: () => Promise<Review>) => {
+    if (s.sendPending) return;
     setActionError("");
     setReview(null);
     setBusy(name);
@@ -210,16 +216,16 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
           {!payer && <p className="muted small">Connect a wallet: each action builds and simulates with it as the fee payer.</p>}
           <DepositForm
             decimals={decimals}
-            disabled={!payer || busy !== ""}
+            disabled={!payer || busy !== "" || s.sendPending}
             onReview={(amount) => run("deposit", () => reviewDeposit(net, payer!, fundKey, amount))}
           />
           <WithdrawForm
             view={view}
-            disabled={!payer || busy !== ""}
+            disabled={!payer || busy !== "" || s.sendPending}
             onReview={(mint, amount) => run("withdraw", () => reviewWithdraw(net, payer!, fundKey, mint, amount))}
           />
           <div className="row wrap">
-            <button disabled={!payer || busy !== ""} onClick={() => void run("ensure", () => reviewEnsureVaults(net, payer!, fundKey))} data-testid="ensure-vaults">
+            <button disabled={!payer || busy !== "" || s.sendPending} onClick={() => void run("ensure", () => reviewEnsureVaults(net, payer!, fundKey))} data-testid="ensure-vaults">
               Ensure vaults
             </button>
             <span className="small muted">Creates any missing quote/target vault account. Idempotent.</span>
@@ -238,7 +244,6 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
           s={s}
           review={review}
           onClose={() => setReview(null)}
-          onSent={() => void load()}
         />
       )}
 

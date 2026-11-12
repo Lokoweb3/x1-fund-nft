@@ -45,6 +45,10 @@ export function createLocalTestWallet(cluster: DetectedCluster, currentCluster: 
     label: "Local test wallet (in memory)",
     publicKey: keypair.publicKey,
     sign: async (tx) => {
+      // Test hook for the Playwright e2e: simulate a wallet prompt that stays
+      // open, so a pending send can be observed. Test wallet only.
+      const delay = Number((globalThis as { __FUND_NFT_TEST_WALLET_DELAY_MS?: unknown }).__FUND_NFT_TEST_WALLET_DELAY_MS ?? 0);
+      if (delay > 0) await new Promise((r) => setTimeout(r, Math.min(delay, 60_000)));
       const now = currentCluster();
       if (now !== "localnet") throw new LocalTestWalletRefused(now);
       tx.sign([keypair]);

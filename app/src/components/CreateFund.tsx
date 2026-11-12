@@ -150,6 +150,7 @@ export function CreateFund({ s }: { s: AppState }) {
       setError(errMsg(err));
       return;
     }
+    if (s.sendPending) return;
     setBusy(true);
     try {
       setReview(await reviewCreateFund(net, p, built.args));
@@ -262,7 +263,7 @@ export function CreateFund({ s }: { s: AppState }) {
         ) : (
           <p className="ok small">Bounds check passed (same checks as state.rs and the CLI). The pool checks run on review.</p>
         )}
-        <button className="primary" disabled={!built.args || busy || (!payer && !simPayer.trim())} onClick={() => void doReview()} data-testid="create-review">
+        <button className="primary" disabled={!built.args || busy || s.sendPending || (!payer && !simPayer.trim())} onClick={() => void doReview()} data-testid="create-review">
           {busy ? "Checking pools and simulating..." : "Review create"}
         </button>
         {error && (

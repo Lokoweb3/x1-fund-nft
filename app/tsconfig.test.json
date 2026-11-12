@@ -1,0 +1,17 @@
+{
+  "//": "Runtime resolution for `npm test` (tsx). Unlike tsconfig.json (types only), every bare import from keeper/src/core resolves to the app's own packages, so tests use one copy of web3.js, Anchor, bn.js and buffer.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@core/*": ["../keeper/src/core/*"],
+      "@solana/web3.js": ["./node_modules/@solana/web3.js/lib/index.cjs.js"],
+      "@anchor-lang/core": ["./node_modules/@anchor-lang/core/dist/cjs/index.js"],
+      "bn.js": ["./node_modules/bn.js/lib/bn.js"],
+      "buffer": ["./node_modules/buffer/index.js"]
+    }
+  }
+}

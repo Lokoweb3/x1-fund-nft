@@ -46,6 +46,8 @@ export function rpcUrlFor(s: RpcSettings): string {
 }
 
 export interface NetworkInfo {
+  /** Increases on every Connect; a reconnect to the same URL is a new session. */
+  generation: number;
   rpcUrl: string;
   connection: Connection;
   genesisHash: string;
@@ -54,10 +56,11 @@ export interface NetworkInfo {
 }
 
 /** getGenesisHash, then classify with the keeper's guard (loopback-only localnet; anything else unknown). */
-export async function detectNetwork(rpcUrl: string): Promise<NetworkInfo> {
+export async function detectNetwork(rpcUrl: string, generation: number): Promise<NetworkInfo> {
   const connection = new Connection(rpcUrl, { commitment: "confirmed" });
   const genesisHash = await connection.getGenesisHash();
   return {
+    generation,
     rpcUrl,
     connection,
     genesisHash,
