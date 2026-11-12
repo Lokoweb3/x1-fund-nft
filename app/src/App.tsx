@@ -41,6 +41,20 @@ export interface AppState {
   sendTick: number;
   /** The live session, read at call time (for guards on async work). */
   live: () => SessionKey;
+  /**
+   * Review ids that were handed to a send, ever. Never cleared: dismissing a
+   * receipt does not remove an id, so a used review can never send again.
+   */
+  attempted: ReadonlySet<number>;
+  /** Sends whose failed transaction has unknown status; shown on later reviews of the same action. */
+  unresolved: Unresolved[];
+}
+
+export interface Unresolved {
+  rpcUrl: string;
+  title: string;
+  fund: string | undefined;
+  signature: string;
 }
 
 export function App() {
@@ -82,6 +96,9 @@ function Shell() {
   pendingRef.current = sendPending;
   const testWalletRef = useRef<AppSigner | null>(null);
   testWalletRef.current = testWallet;
+
+  const [unresolved, setUnresolved] = useState<Unresolved[]>([]);
+  const attemptedRef = useRef(new Set<number>());
 
   // The signer is bound to one adapter object; it signs through that adapter only.
   const adapter = wallet.wallet?.adapter ?? null;
@@ -234,8 +251,10 @@ function Shell() {
     setSends((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
 
   const startSend = (review: Review) => {
-    if (pendingRef.current || !net || !signer) return;
+    if (pendingRef.current || !net || !signer || attemptedRef.current.has(review.id)) return;
     pendingRef.current = true;
+    // Consumed for good: dismissing the receipt does not make it sendable again.
+    attemptedRef.current.add(review.id);
     const id = ++sendCounter;
     const record: SendRecord = {
       id,
@@ -266,6 +285,10 @@ function Shell() {
       (err: unknown) => {
         if (err instanceof PlanSendError) {
           update(id, { status: "failed", outcomes: err.done, error: err.message, failedSig: err.signature, failState: err.state });
+          if (err.state === "unknown" && err.signature) {
+            const signature = err.signature;
+            setUnresolved((u) => [...u, { rpcUrl: review.rpcUrl, title: review.title, fund: review.plan.fund?.toBase58(), signature }]);
+          }
         } else {
           update(id, { status: "failed", error: `${errMsg(err)}. Nothing was sent.` });
         }
@@ -287,6 +310,8 @@ function Shell() {
     sends,
     sendTick,
     live,
+    attempted: attemptedRef.current,
+    unresolved,
   };
   const cluster = net?.cluster;
   const lock = sendPending ? "A send is in progress; wait for it to finish." : undefined;

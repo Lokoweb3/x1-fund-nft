@@ -91,6 +91,13 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   await page.getByLabel("Deposit amount").fill("1");
   await page.getByTestId("deposit-review").click();
   await signAndSend(page);
+  // Dismissing the receipt (without navigating) must not make this review
+  // sendable again: a retry needs a freshly built and simulated review.
+  await page.getByTestId("send-record").first().getByTestId("dismiss-send").click();
+  await expect(page.getByTestId("send-record").filter({ hasText: "Deposit" })).toHaveCount(0);
+  await expect(page.getByTestId("review")).toBeVisible();
+  await expect(page.getByTestId("review").getByTestId("sign-and-send")).toHaveCount(0);
+  await expect(page.getByTestId("review-used")).toBeVisible();
   expect(await budgets(page)).toEqual(["200000", "800000"]);
   await shot(page, "flow-fund-after-deposit");
   await expect(page.getByTestId(`vault-${USDC}`).getByTestId("vault-balance")).toHaveAttribute("data-raw", "1000000");
@@ -133,7 +140,7 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   await expect(page.getByTestId("ensure-vaults")).toBeDisabled();
   await expect(page.getByTestId("deposit-review")).toBeDisabled();
   await expect(page.getByTestId("drop-test-wallet")).toBeDisabled();
-  await expect(page.getByTestId("dismiss-send")).toHaveCount(3, { timeout: 1000 }); // create, deposit, withdraw; not the pending one
+  await expect(page.getByTestId("dismiss-send")).toHaveCount(2, { timeout: 1000 }); // create, withdraw (deposit was dismissed); not the pending one
   await expect(pending).toHaveAttribute("data-status", "done");
   await page.evaluate(() => {
     (window as unknown as { __FUND_NFT_TEST_WALLET_DELAY_MS: number }).__FUND_NFT_TEST_WALLET_DELAY_MS = 0;

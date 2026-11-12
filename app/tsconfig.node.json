@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "DOM"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,
@@ -9,15 +13,33 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "noEmit": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "baseUrl": ".",
     "paths": {
-      "@core/*": ["../keeper/src/core/*"],
-      "@solana/web3.js": ["./node_modules/@solana/web3.js"],
-      "@anchor-lang/core": ["./node_modules/@anchor-lang/core"],
-      "bn.js": ["./node_modules/@types/bn.js"],
-      "buffer": ["./node_modules/buffer"]
-    }
+      "@core/*": [
+        "../keeper/src/core/*"
+      ],
+      "@solana/web3.js": [
+        "./node_modules/@solana/web3.js"
+      ],
+      "@anchor-lang/core": [
+        "./node_modules/@anchor-lang/core"
+      ],
+      "bn.js": [
+        "./node_modules/@types/bn.js"
+      ],
+      "buffer": [
+        "./node_modules/buffer"
+      ]
+    },
+    "jsx": "react-jsx"
   },
-  "include": ["vite.config.ts", "playwright.config.ts", "test", "e2e"]
+  "include": [
+    "vite.config.ts",
+    "playwright.config.ts",
+    "test",
+    "e2e"
+  ]
 }

@@ -8,11 +8,22 @@ import type { Review } from "../lib/actions";
  * signer still match. The send itself runs in app state (App.startSend), so
  * closing this panel or navigating cannot orphan it; while it is pending,
  * this panel cannot be closed and no other review can start.
+ *
+ * A review is single-use: once handed to a send (s.attempted, never cleared)
+ * it can never send again, even after its receipt is dismissed. A retry
+ * needs a freshly built and simulated review.
  */
 export function ReviewPanel({ s, review, onClose }: { s: AppState; review: Review; onClose: () => void }) {
   const cluster = s.net?.cluster ?? "unknown";
   const record = s.sends.find((r) => r.reviewId === review.id);
   const mine = record?.status === "pending";
+  const used = s.attempted.has(review.id);
+  const fund = review.plan.fund?.toBase58();
+  // An earlier attempt of the same action whose status is unknown may have
+  // landed. Shown on every later review of that action; not dismissable.
+  const unresolved = s.unresolved.filter(
+    (u) => u.rpcUrl === review.rpcUrl && u.title === review.title && (review.title === "Create fund" || u.fund === fund),
+  );
 
   const blockers: string[] = [];
   if (!s.net || s.net.rpcUrl !== review.rpcUrl || s.net.generation !== review.generation) {
@@ -48,6 +59,12 @@ export function ReviewPanel({ s, review, onClose }: { s: AppState; review: Revie
           </div>
         ))}
       </dl>
+      {unresolved.map((u) => (
+        <p key={u.signature} className="error" data-testid="unresolved-note">
+          An earlier {u.title.toLowerCase()} here has UNKNOWN status and may have landed. Check signature{" "}
+          <span className="mono">{u.signature}</span> on the explorer before sending again.
+        </p>
+      ))}
       {review.warnings.map((w, i) => (
         <p key={i} className="warn">
           {w}
@@ -91,7 +108,12 @@ export function ReviewPanel({ s, review, onClose }: { s: AppState; review: Revie
             </ul>
           </details>
           {!review.simOk && <p className="error">A simulation failed, so nothing can be sent. Nothing was signed or sent.</p>}
-          {review.simOk && !record && (
+          {review.simOk && used && !record && (
+            <p className="warn" data-testid="review-used">
+              This review was already used for a send. Build a new review (it is simulated again) to try again.
+            </p>
+          )}
+          {review.simOk && !used && (
             <>
               {blockers.map((b, i) => (
                 <p key={i} className="warn">

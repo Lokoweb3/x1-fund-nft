@@ -7,11 +7,22 @@
     "resolveJsonModule": true,
     "baseUrl": ".",
     "paths": {
-      "@core/*": ["../keeper/src/core/*"],
-      "@solana/web3.js": ["./node_modules/@solana/web3.js/lib/index.cjs.js"],
-      "@anchor-lang/core": ["./node_modules/@anchor-lang/core/dist/cjs/index.js"],
-      "bn.js": ["./node_modules/bn.js/lib/bn.js"],
-      "buffer": ["./node_modules/buffer/index.js"]
-    }
+      "@core/*": [
+        "../keeper/src/core/*"
+      ],
+      "@solana/web3.js": [
+        "./node_modules/@solana/web3.js/lib/index.cjs.js"
+      ],
+      "@anchor-lang/core": [
+        "./node_modules/@anchor-lang/core/dist/cjs/index.js"
+      ],
+      "bn.js": [
+        "./node_modules/bn.js/lib/bn.js"
+      ],
+      "buffer": [
+        "./node_modules/buffer/index.js"
+      ]
+    },
+    "jsx": "react-jsx"
   }
 }
