@@ -73,6 +73,7 @@ AUTHORITY="9Dpjw2pB5kXJr6ZTHiqzEMfJPic3om9jgNacnwpLCoaU"
 TOKENKEG="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022="TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 ATA_PROGRAM="ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+METAPLEX="metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
 X1_SYSVAR_SYSCALL_EXCEPTION="CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq"
 
 # Scratch dir: required, absolute, resolved, never / or under keys/.
@@ -279,7 +280,7 @@ start_validator -C "$CFG" --mint "$PAYER" --reset --quiet \
   --bpf-program "$PROGRAM_ID" "$SO" \
   --url "$MAINNET_RPC" \
   --clone-upgradeable-program "$TOKENKEG" --clone-upgradeable-program "$TOKEN_2022" \
-  --clone-upgradeable-program "$XDEX" \
+  --clone-upgradeable-program "$XDEX" --clone-upgradeable-program "$METAPLEX" \
   --account "$USDC" "$USDC_FILE" \
   "${CLONES[@]}" "${FEATURE_ARGS[@]}"
 [ -n "$VALIDATOR_PID" ] || die "validator did not start"
