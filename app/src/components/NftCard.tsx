@@ -138,6 +138,12 @@ export function Allocation({ valuation, labels }: { valuation: Valuation; labels
         {parts.map(({ r, i, share }) => (
           <span key={r.mint.address.toBase58()} className={`seg seg-${i % 6}`} style={{ width: `${Math.max(share, 1.5)}%` }} />
         ))}
+        {valuation.native?.value !== undefined && valuation.native.value > 0n && (
+          <span
+            className={`seg seg-${parts.length % 6}`}
+            style={{ width: `${Math.max(sharePercent(valuation.native.value, valuation.total), 1.5)}%` }}
+          />
+        )}
       </div>
       <ul className="alloc-legend">
         {parts.map(({ r, i, share }) => (
@@ -146,6 +152,12 @@ export function Allocation({ valuation, labels }: { valuation: Valuation; labels
             {symOf(labels, r.mint.address.toBase58())} <strong>{formatShare(share)}</strong>
           </li>
         ))}
+        {valuation.native?.value !== undefined && valuation.native.value > 0n && (
+          <li>
+            <span className={`swatch seg-${parts.length % 6}`} aria-hidden="true" />
+            XNT (native) <strong>{formatShare(sharePercent(valuation.native.value, valuation.total))}</strong>
+          </li>
+        )}
         {!valuation.complete && <li className="muted">+ value unknown</li>}
       </ul>
     </div>

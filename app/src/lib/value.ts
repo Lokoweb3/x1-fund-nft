@@ -99,6 +99,34 @@ export interface Valuation {
   complete: boolean;
   /** Quote vault balance, raw; undefined when the quote vault is missing. */
   quoteBalance: bigint | undefined;
+  /** Native XNT the holder can withdraw (see withNative); absent when there is none. */
+  native?: NativeHolding;
+}
+
+/** Wrapped XNT: the same asset as native XNT, 1:1, both 9 decimals. */
+export const WXNT_MINT = "So11111111111111111111111111111111111111112";
+
+export interface NativeHolding {
+  /** Lamports above the Fund account's rent-exempt minimum (what withdraw_native may move). */
+  amount: bigint;
+  /** Raw quote units: the amount itself when the quote is WXNT (1:1), else undefined (not priced). */
+  value: bigint | undefined;
+}
+
+/**
+ * Add the withdrawable native XNT to a valuation, display only. Counted in
+ * the total 1:1 when the fund pays with WXNT (same asset); any other quote
+ * leaves it unpriced and the total marked incomplete. Nothing when zero.
+ */
+export function withNative(v: Valuation, quote: PublicKey, available: bigint | undefined): Valuation {
+  if (available === undefined || available <= 0n) return v;
+  const value = quote.toBase58() === WXNT_MINT ? available : undefined;
+  return {
+    ...v,
+    total: value === undefined ? v.total : v.total + value,
+    complete: v.complete && value !== undefined,
+    native: { amount: available, value },
+  };
 }
 
 export interface ValuationInput {

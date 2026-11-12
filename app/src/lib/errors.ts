@@ -77,9 +77,35 @@ function refusedOnChain(sc: SendScope | undefined, raw: string, what: string): s
   return parts.join(" ");
 }
 
+export const NATIVE_WITHDRAW_MISSING =
+  "This program version has no native withdraw yet. The owner must upgrade the program first (docs/UPGRADE_WITHDRAW_NATIVE.md).";
+
+/**
+ * Anchor error 101 (InstructionFallbackNotFound): the deployed program has no
+ * handler for the instruction. Of the app's instructions only withdraw_native
+ * is newer than the first mainnet build, so this means "upgrade first". A
+ * bare custom error 101 is matched only next to withdraw_native, because
+ * other programs (e.g. Token Metadata) have their own error 101.
+ */
+function isFallbackNotFound(raw: string): boolean {
+  if (/InstructionFallbackNotFound/.test(raw)) return true;
+  return /withdraw_native|withdrawNative|withdraw-native/.test(raw) && /"Custom":101\b|custom program error: 0x65\b|Error Number: 101\./.test(raw);
+}
+
 export function friendlyError(err: unknown, opts: { cluster?: string; send?: SendScope } = {}): Friendly {
   const raw = errText(err);
   const sc = scopeOf(err, opts.send);
+  if (isFallbackNotFound(raw)) return { title: NATIVE_WITHDRAW_MISSING, raw };
+  if (/NativeAboveAvailable|0x17a6\b|"Custom":6054\b/.test(raw)) {
+    return {
+      title: refusedOnChain(
+        sc,
+        raw,
+        "The fund no longer has that much native XNT above its rent reserve, so the program refused. Refresh the page and try a smaller amount or \"all\".",
+      ),
+      raw,
+    };
+  }
   if (/is not deployed on this RPC/.test(raw)) {
     return {
       title:
@@ -131,4 +157,16 @@ export function friendlyError(err: unknown, opts: { cluster?: string; send?: Sen
     return { title: declined(sc, raw), raw };
   }
   return { title: raw.split("\n")[0]!, raw };
+}
+
+/**
+ * A friendly reading of a failed simulation (error plus logs, with the
+ * transaction label so a withdraw_native fallback error is recognised), or
+ * undefined when no mapping applies and the raw status is the best text.
+ */
+export function friendlySim(sim: { label: string; err: unknown; logs: string[] }): Friendly | undefined {
+  if (sim.err === null || sim.err === undefined) return undefined;
+  const raw = [`${sim.label}: simulation failed ${JSON.stringify(sim.err)}`, ...sim.logs].join("\n");
+  const f = friendlyError(raw);
+  return f.title === raw.split("\n")[0] ? undefined : f;
 }

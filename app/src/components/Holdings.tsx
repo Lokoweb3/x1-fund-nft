@@ -106,6 +106,34 @@ export function HoldingsCard({ state, view, labels }: { state: ValuationState; v
                   </tr>
                 );
               })}
+              {v.native && (
+                <tr className="holding" data-testid="holding-native">
+                  <th scope="row" title="Native XNT on the fund account above its rent reserve (withdraw it with Withdraw native XNT)">
+                    <span className="chip-token">
+                      <span className="dot" aria-hidden="true" />
+                      XNT (native, e.g. reflections)
+                    </span>
+                  </th>
+                  <td className="num" title={exactUi(v.native.amount, 9)}>
+                    {formatAmount(v.native.amount, 9)}
+                  </td>
+                  <td className="num" title={v.native.value === undefined ? "not priced in " + q : `${exactUi(v.native.value, qd)} ${q} (1 XNT = 1 WXNT)`}>
+                    {v.native.value === undefined ? <span className="muted">unknown</span> : formatValue(v.native.value, qd)}
+                  </td>
+                  <td className="num share-cell">
+                    {v.native.value === undefined ? (
+                      <span className="muted">–</span>
+                    ) : (
+                      <>
+                        <span className="bar" aria-hidden="true">
+                          <span style={{ width: `${Math.min(100, sharePercent(v.native.value, v.total))}%` }} />
+                        </span>
+                        {formatShare(sharePercent(v.native.value, v.total))}
+                      </>
+                    )}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -118,6 +146,13 @@ export function HoldingsCard({ state, view, labels }: { state: ValuationState; v
           </p>
         );
       })}
+      {v?.native && (
+        <p className="small muted" data-testid="holding-native-note">
+          {v.native.value === undefined
+            ? `Native XNT is not priced in ${q}, so it is not in the total.`
+            : "Native XNT counts 1:1 as WXNT (the same asset); only the part above the fund account's rent reserve is counted."}
+        </p>
+      )}
       <p className="small muted">Estimate at each pool's current price, before transfer fees and price impact. Display only: not what a swap or withdrawal would pay.</p>
     </div>
   );

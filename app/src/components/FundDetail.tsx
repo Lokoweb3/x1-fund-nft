@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PublicKey } from "@solana/web3.js";
 import { formatUi, parseUi, shellQuote } from "@core/owner.js";
-import { loadFundView, type FundView } from "@core/rpc.js";
+import { loadFundView, readNativeBalance, type FundView, type NativeBalance } from "@core/rpc.js";
 import type { AppState } from "../App";
-import { makeProgram, reviewDeposit, reviewEnsureVaults, reviewWithdraw, type Review } from "../lib/actions";
+import { makeProgram, reviewDeposit, reviewEnsureVaults, reviewWithdraw, reviewWithdrawNative, type Review } from "../lib/actions";
+import { nativeBlocker, nativeLine, parseNativeAmount } from "../lib/native";
+import { withNative } from "../lib/value";
 import { createLatest, sameView, type ViewIdentity } from "../lib/latest";
 import { signerId } from "../lib/session";
 import { ReviewPanel } from "./ReviewPanel";
@@ -14,7 +16,7 @@ import { reviewSetMetadata, type Labels } from "../lib/actions";
 import { useTokenLabels } from "../lib/lookups";
 import { bpsToPercent, countdown, humanInterval } from "../lib/wizard";
 import { ArtStep, type ArtResult } from "./ArtStep";
-import { HoldingsCard, useValuation } from "./Holdings";
+import { HoldingsCard, useValuation, type ValuationState } from "./Holdings";
 import { NftCard } from "./NftCard";
 
 /** Light polling: at most every 30 s, only while the tab is visible. */
@@ -27,12 +29,13 @@ function iso(unix: bigint): string {
 export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
   // The loaded view carries the identity it was read under; a reply for an
   // older network generation, RPC or fund is dropped, never shown.
-  const [loaded, setLoaded] = useState<{ identity: ViewIdentity; view: FundView } | null>(null);
+  // The native XNT balance is read with the view, under the same identity.
+  const [loaded, setLoaded] = useState<{ identity: ViewIdentity; view: FundView; native: NativeRead } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [review, setReview] = useState<Review | null>(null);
   const [busy, setBusy] = useState("");
-  const [actionError, setActionError] = useState("");
+  const [actionError, setActionError] = useState<unknown>(null);
   const net = s.net;
   const fundKey = useMemo(() => new PublicKey(fund), [fund]);
   const loads = useRef(createLatest()).current;
@@ -47,9 +50,19 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
     setLoading(true);
     try {
       const now = BigInt(Math.floor(Date.now() / 1000));
-      const r = await loads.run(loadFundView(net.connection, makeProgram(net), new PublicKey(fund), now));
+      const key = new PublicKey(fund);
+      const r = await loads.run(
+        Promise.all([
+          loadFundView(net.connection, makeProgram(net), key, now),
+          // A failed native read (e.g. a balance a JS number cannot hold exactly) must not hide the fund.
+          readNativeBalance(net.connection, key).then(
+            (balance): NativeRead => ({ balance }),
+            (err: unknown): NativeRead => ({ error: errMsg(err) }),
+          ),
+        ]),
+      );
       if (r.stale || !sameView(identity, currentRef.current)) return;
-      setLoaded({ identity, view: r.value });
+      setLoaded({ identity, view: r.value[0], native: r.value[1] });
       setError("");
     } catch (err) {
       if (!sameView(identity, currentRef.current)) return;
@@ -69,7 +82,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
     setLoaded(null);
     setReview(null);
     setError("");
-    setActionError("");
+    setActionError(null);
   }, [net, fund, loads, builds]);
 
   useEffect(() => {
@@ -94,7 +107,9 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
     setBusy("");
   }, [signerKey, builds]);
 
-  const view = loaded && sameView(loaded.identity, current) ? loaded.view : null;
+  const fresh = loaded && sameView(loaded.identity, current) ? loaded : null;
+  const view = fresh?.view ?? null;
+  const native = fresh?.native;
   // Actions only for a view loaded under the current network and fund, with a signer, and no send in flight.
   const actionsEnabled = !!view && !!payer && !s.sendPending && busy === "";
 
@@ -103,7 +118,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
     const identity = current;
     const builtFor = signerKey;
     const epoch = s.live().signerEpoch;
-    setActionError("");
+    setActionError(null);
     setReview(null);
     setBusy(name);
     try {
@@ -112,7 +127,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
       if (r.stale || !sameView(identity, currentRef.current) || now.signerId !== builtFor || now.signerEpoch !== epoch) return;
       setReview({ ...r.value, signerEpoch: epoch });
     } catch (err) {
-      if (sameView(identity, currentRef.current)) setActionError(errMsg(err));
+      if (sameView(identity, currentRef.current)) setActionError(err);
     } finally {
       setBusy("");
     }
@@ -122,6 +137,12 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
   const labels = useTokenLabels(net, view ? [view.account.quoteMint, ...view.account.targets.map((t) => t.mint)] : []);
   // Display only: never passed to a review, a simulation or a transaction.
   const valuation = useValuation(net?.connection, view);
+  const nativeAvailable = native?.balance?.available;
+  const holdings = useMemo<ValuationState>(
+    () => (valuation.status === "ok" && view ? { status: "ok", valuation: withNative(valuation.valuation, view.account.quoteMint, nativeAvailable) } : valuation),
+    [valuation, view, nativeAvailable],
+  );
+  const holder = !!payer && !!view?.nftAccount && view.nftAccount.owner.equals(payer);
 
   return (
     <>
@@ -143,8 +164,8 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
         {view && (
           <>
             <div className="fund-hero">
-              {net && <NftCard net={net} view={view} sendTick={s.sendTick} holdings={valuation} labels={labels} />}
-              <HoldingsCard state={valuation} view={view} labels={labels} />
+              {net && <NftCard net={net} view={view} sendTick={s.sendTick} holdings={holdings} labels={labels} />}
+              <HoldingsCard state={holdings} view={view} labels={labels} />
             </div>
             <FundSummary view={view} labels={labels} />
             <dl className="kv">
@@ -283,6 +304,14 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
             disabled={!actionsEnabled}
             onReview={(mint, amount) => run("withdraw", () => reviewWithdraw(net, payer!, fundKey, mint, amount, labels))}
           />
+          {native && (
+            <NativeWithdrawForm
+              native={native}
+              holder={holder}
+              disabled={!actionsEnabled}
+              onReview={(amount) => run("native withdraw", () => reviewWithdrawNative(net, payer!, fundKey, amount))}
+            />
+          )}
           <div className="row wrap">
             <button disabled={!actionsEnabled} onClick={() => void run("ensure", () => reviewEnsureVaults(net, payer!, fundKey))} data-testid="ensure-vaults">
               Ensure vaults
@@ -290,11 +319,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
             <span className="small muted">Creates any missing quote/target vault account. Idempotent.</span>
           </div>
           {busy && <p className="muted">Building and simulating {busy}...</p>}
-          {actionError && (
-            <p className="error" data-testid="action-error">
-              {actionError}
-            </p>
-          )}
+          {actionError !== null && <FriendlyError err={actionError} cluster={net.cluster} testId="action-error" />}
         </section>
       )}
 
@@ -396,6 +421,71 @@ function WithdrawForm({
         Review withdraw
       </button>
       {error && <span className="error">{error}</span>}
+    </div>
+  );
+}
+
+/** The native XNT read that comes with a loaded view: the balance, or why it could not be read. */
+type NativeRead = { balance: NativeBalance; error?: undefined } | { balance?: undefined; error: string };
+
+/** "Withdraw native XNT": holder only, through the shared withdraw-native planner. */
+export function NativeWithdrawForm({
+  native,
+  holder,
+  disabled,
+  onReview,
+}: {
+  native: NativeRead;
+  holder: boolean;
+  disabled: boolean;
+  onReview: (amount: bigint | "all") => void;
+}) {
+  const [amount, setAmount] = useState("");
+  const [all, setAll] = useState(false);
+  const [error, setError] = useState("");
+  const b = native.balance;
+  const blocker = nativeBlocker({ holder, available: b?.available, readError: native.error });
+  const submit = () => {
+    setError("");
+    try {
+      if (!b) throw new Error("the native balance is not loaded");
+      onReview(parseNativeAmount(amount, all, b.available));
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  };
+  return (
+    <div className="native-withdraw" data-testid="native-withdraw">
+      {b && (
+        <p className="small" data-testid="native-line" data-available={b.available.toString()}>
+          {nativeLine(b)}
+        </p>
+      )}
+      <div className="form-row">
+        <label>
+          Withdraw native XNT{" "}
+          <input
+            aria-label="Native XNT amount"
+            inputMode="decimal"
+            value={all ? "" : amount}
+            disabled={all || !!blocker}
+            onChange={(e) => setAmount(e.target.value)}
+            placeholder={all ? "all" : "0.01"}
+          />
+        </label>
+        <label>
+          <input type="checkbox" checked={all} disabled={!!blocker} onChange={(e) => setAll(e.target.checked)} aria-label="Withdraw all native XNT" /> all
+        </label>
+        <button disabled={disabled || !!blocker || (!all && !amount)} onClick={submit} data-testid="native-withdraw-review">
+          Review native withdraw
+        </button>
+        {error && <span className="error">{error}</span>}
+      </div>
+      {blocker && (
+        <p className="small muted" data-testid="native-blocker">
+          {blocker}
+        </p>
+      )}
     </div>
   );
 }

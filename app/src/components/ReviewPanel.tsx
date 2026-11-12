@@ -1,5 +1,6 @@
 import type { AppState } from "../App";
 import { assertSingleTxInscription, type Review } from "../lib/actions";
+import { friendlySim } from "../lib/errors";
 
 /**
  * Human-readable review of a simulated plan, then "Sign & send". The button
@@ -106,6 +107,16 @@ export function ReviewPanel({ s, review, onClose }: { s: AppState; review: Revie
                   {sim.skipped ? "not simulated yet" : sim.err ? `simulation FAILED ${JSON.stringify(sim.err)}` : "simulation ok"}
                 </span>
               </div>
+              {(() => {
+                const f = friendlySim(sim);
+                return (
+                  f && (
+                    <p className="error small" data-testid="sim-friendly">
+                      {f.title}
+                    </p>
+                  )
+                );
+              })()}
               {sim.skipped && (
                 <p className="small warn-text" data-testid="sim-skipped">
                   This one needs what transaction {i} creates, so it cannot be simulated in advance. The RPC simulates it (preflight) when it is sent,

@@ -6,7 +6,7 @@
  * signed or sent on mainnet.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { connectTo, fillWizard, fundWallet, POOL, shot, signAndSend, USDC } from "./helpers";
+import { airdrop, connectTo, fillWizard, fundWallet, POOL, shot, signAndSend, USDC } from "./helpers";
 
 async function budgets(page: Page): Promise<string[]> {
   await page.getByTestId("refresh").click();
@@ -153,6 +153,37 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   expect(await budgets(page)).toEqual(["180000", "720000"]);
   await expect(page.getByTestId(`vault-${USDC}`).getByTestId("vault-balance")).toHaveAttribute("data-raw", "900000");
 
+  // Native XNT: a new fund holds only its rent, so there is nothing to withdraw.
+  const nativeLine = page.getByTestId("native-line");
+  await expect(nativeLine).toHaveAttribute("data-available", "0");
+  await expect(nativeLine).toContainText("Native XNT on the fund:");
+  await expect(page.getByTestId("native-blocker")).toHaveText(
+    "Nothing to withdraw yet. Native XNT arrives here from reflection tokens like Test or from direct transfers.",
+  );
+  await expect(page.getByTestId("native-withdraw-review")).toBeDisabled();
+  await expect(page.getByTestId("holding-native")).toHaveCount(0);
+  // 0.5 XNT arrives directly (as a reflection would); withdraw 0.2, then all.
+  await airdrop(fund, 500_000_000);
+  await page.getByTestId("refresh").click();
+  await expect(nativeLine).toHaveAttribute("data-available", "500000000");
+  await expect(page.getByTestId("holding-native")).toContainText("XNT (native, e.g. reflections)");
+  await page.getByLabel("Native XNT amount").fill("0.2");
+  await page.getByTestId("native-withdraw-review").click();
+  await expect(page.getByTestId("review")).toContainText("Review: Withdraw native XNT");
+  await expect(page.getByTestId("review-sentences")).toContainText("You move 0.2 XNT (native) from the fund account to your wallet");
+  await expect(page.getByTestId("review-sentences")).toContainText("stays there for rent and can never be withdrawn; after this, 0.3 XNT is left to withdraw.");
+  await expect(page.getByTestId("review-sentences")).toContainText("as quoted by the RPC");
+  await shot(page, "flow-native-withdraw-review");
+  await signAndSend(page);
+  await expect(nativeLine).toHaveAttribute("data-available", "300000000");
+  await page.getByLabel("Withdraw all native XNT").check();
+  await page.getByTestId("native-withdraw-review").click();
+  await expect(page.getByTestId("review-sentences")).toContainText("You move 0.3 XNT (native)");
+  await signAndSend(page);
+  await expect(nativeLine).toHaveAttribute("data-available", "0");
+  await expect(page.getByTestId("native-blocker")).toContainText("Nothing to withdraw yet.");
+  await expect(page.getByTestId("holding-native")).toHaveCount(0);
+
   // Ensure vaults: every vault exists, nothing to do, no send button.
   await page.getByTestId("ensure-vaults").click();
   await expect(page.getByTestId("nothing-to-do")).toBeVisible();
@@ -181,7 +212,7 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   await expect(page.getByTestId("ensure-vaults")).toBeDisabled();
   await expect(page.getByTestId("deposit-review")).toBeDisabled();
   await expect(page.getByTestId("drop-test-wallet")).toBeDisabled();
-  await expect(page.getByTestId("dismiss-send")).toHaveCount(3, { timeout: 1000 }); // create, set metadata, withdraw (deposit was dismissed); not the pending one
+  await expect(page.getByTestId("dismiss-send")).toHaveCount(5, { timeout: 1000 }); // create, set metadata, withdraw, 2 native withdraws (deposit was dismissed); not the pending one
   await expect(pending).toHaveAttribute("data-status", "done");
   await page.evaluate(() => {
     (window as unknown as { __FUND_NFT_TEST_WALLET_DELAY_MS: number }).__FUND_NFT_TEST_WALLET_DELAY_MS = 0;

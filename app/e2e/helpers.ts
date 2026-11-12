@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { expect, type Page } from "@playwright/test";
+import { Connection, PublicKey } from "@solana/web3.js";
 import { E2E_RPC_PORT } from "../playwright.config";
 
 const run = promisify(execFile);
@@ -27,6 +28,14 @@ export async function fundWallet(pubkey: string): Promise<string> {
     }
   }
   throw new Error(`--fund-wallet never succeeded: ${last}`);
+}
+
+/** Airdrop native XNT straight to any account (e.g. a Fund PDA) on the local validator, confirmed. */
+export async function airdrop(to: string, lamports: number): Promise<void> {
+  const connection = new Connection(LOCAL_URL, "confirmed");
+  const sig = await connection.requestAirdrop(new PublicKey(to), lamports);
+  const latest = await connection.getLatestBlockhash("confirmed");
+  await connection.confirmTransaction({ signature: sig, ...latest }, "confirmed");
 }
 
 export async function connectTo(page: Page, choice: "local" | "mainnet") {
