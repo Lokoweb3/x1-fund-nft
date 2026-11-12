@@ -38,8 +38,10 @@ avm use 1.2.2
 
 ```sh
 cargo test -p fund_nft --lib
-anchor build
+anchor build --arch v0 -- --features testnet
 ```
+
+`--arch v0` is required: Anchor 1.2.2 defaults to `--arch v3`, and X1 mainnet and testnet have SBPF v1 and v3 deployment inactive, so a v3 `.so` (ELF `e_flags` 3) cannot be deployed there. `--features testnet` switches the program's single allowed pool program to the testnet XDEX id (see below). Without it the build only accepts mainnet XDEX pools.
 
 Program id in the source: `BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck`.
 
@@ -65,7 +67,7 @@ solana program show <PROGRAM_ID> --url https://rpc.testnet.x1.xyz
 
 There is no faucet command in this repo. `solana airdrop` asks the testnet RPC. If that RPC does not airdrop, fund the deployer out of band and do not continue with a mainnet key.
 
-XDEX on testnet is a different deployment from mainnet program `sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN`. Three testnet pools checked on 2026-11-11 are owned by `7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf`, the address in the XDEX IDL. The fund program allowlists exactly one pool program. The default build allows the mainnet id; build with `--features testnet` to allow the testnet id instead (`anchor build --ignore-keys --arch v0 -- --features testnet`). A fund created on testnet must pin testnet pool addresses. The keeper reads the pool program from the pool account's owner.
+XDEX on testnet is a different deployment from mainnet program `sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN`. Three testnet pools checked on 2026-11-11 are owned by `7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf`, the address in the XDEX IDL. The fund program allowlists exactly one pool program. The default build allows the mainnet id; build with `--features testnet` to allow the testnet id instead (`anchor build --arch v0 -- --features testnet`). A fund created on testnet must pin testnet pool addresses. The keeper reads the pool program from the pool account's owner.
 
 ## Make the program immutable
 

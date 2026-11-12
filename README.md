@@ -23,11 +23,13 @@ avm use 1.2.2
 
 ```sh
 cargo test -p fund_nft --lib
-anchor build
+anchor build --ignore-keys --arch v0
 cargo test -p fund-nft-tests -- --test-threads=1
 ```
 
-The integration test starts `solana-test-validator` on port 18999 and clones the USDC.X/TEST pool from `https://rpc.mainnet.x1.xyz`. It needs the Agave CLI on `PATH` and network access to that RPC. Build the program first so `target/deploy/fund_nft.so` exists.
+`--arch v0` is required. Anchor 1.2.2 defaults to `--arch v3` (ELF `e_flags` 3), and X1 mainnet and testnet have SBPF v1 and v3 deployment inactive. `--arch v0` produces `e_flags` 0. `--ignore-keys` skips the check that `target/deploy/fund_nft-keypair.json` matches `declare_id!`. The default build allows only the mainnet XDEX program; add `-- --features testnet` to allow the testnet one instead.
+
+The integration test starts `solana-test-validator` on port 18999 and clones the USDC.X/TEST pool and X1's Tokenkeg, Token-2022, and ATA programs from `https://rpc.mainnet.x1.xyz`. By default it deactivates every feature X1 mainnet reports inactive, except SIMD-0127 (see `docs/PROGRESS.md`). `FUND_NFT_FEATURES=agave` uses Agave defaults; `FUND_NFT_FEATURES=clone` uses plain `--clone-feature-set` and is known to fail. The test needs the Agave CLI on `PATH` and network access to that RPC. Build the program first so `target/deploy/fund_nft.so` exists; the test checks it is SBPF v0 and does not import `sol_get_sysvar`.
 
 Step-by-step build notes are in `docs/PROGRESS.md`. Deploy instructions for X1 testnet, including the command that freezes upgrade authority, are in `docs/DEPLOY_TESTNET.md`. This repo does not deploy to mainnet.
 

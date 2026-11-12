@@ -113,3 +113,11 @@ cd keeper && npm install && npx tsc --noEmit
 The probe quotes 20_000 raw USDC.X from the cloned reserves, swaps with `minimum_amount_out = 1`, and checks the formula including the 5% ceiling fee. It then swaps the same size with `minimum_amount_out` one raw unit above the post-fee amount and still below the pre-fee amount. XDEX returns `ExceededSlippage` (code 6005). The pool's minimum is the amount the destination receives after the output transfer fee.
 
 The authority seed check is a host unit test. It does not change the program.
+
+## Follow-up — SBPF v0 and the X1 feature set
+
+X1 mainnet and testnet have SBPF v1 and v3 deployment inactive. Anchor 1.2.2 builds `--arch v3` by default, which is why `--clone-feature-set` failed in Step 6. `anchor build --ignore-keys --arch v0` produces `e_flags` 0, and that `.so` loads under X1's feature set.
+
+With the feature set cloned, the validator's bundled Tokenkeg fails the NFT mint CPI with `Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA failed: unsupported BPF instruction`. The test now clones X1 mainnet's real Tokenkeg and Token-2022 (both owned by `BPFLoaderUpgradeab1e`) and ATA (owned by `BPFLoader2`), and that real X1 Tokenkeg is what we test against. It still failed under plain `--clone-feature-set`, with the same log line after 48 compute units. X1's Tokenkeg (byte-identical to mainnet, last deployed in slot 85798112, `e_flags` 0) imports `sol_get_sysvar`. X1 reports SIMD-0127 `CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq` ("Enable syscall for fetching Sysvar bytes") inactive, and Agave 4.1.2 does not register that syscall while it is inactive. Tokenkeg transactions succeed on X1 mainnet, so X1's validator provides the syscall anyway. A bisection over the 118 X1-inactive features showed that deactivating only SIMD-0127 on Agave defaults reproduces the failure.
+
+The default test mode is therefore Agave defaults plus `--deactivate-feature` for every feature X1 mainnet reports inactive, with the list read from X1 RPC at test time, except SIMD-0127. The test asserts that `fund_nft.so` does not import `sol_get_sysvar`; it imports `sol_get_clock_sysvar` and `sol_get_rent_sysvar`. `FUND_NFT_FEATURES=clone` keeps the plain `--clone-feature-set` mode, which fails for the reason above.
