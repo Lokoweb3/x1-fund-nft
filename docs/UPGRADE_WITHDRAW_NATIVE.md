@@ -67,7 +67,7 @@ X1 mainnet validators run Agave 4.0.4 (99.97% of stake on 2026-11-12). The rehea
 4. The upgrade runs through `scripts/upgrade-withdraw-native.sh` in its local mode, the same `check` and `apply` the owner runs:
    - `check` with the wrong key fails, and `apply` without `--i-understand-mainnet` is refused.
    - Unknown code is refused at any length: the mainnet build with one byte changed, at 403,520, 412,528 and 412,529 bytes; the old build with a non-zero byte in its padding; the new build followed by a non-zero byte. `apply` on these sends nothing.
-   - A failing `program dump` is refused, and so is a program id that isn't a program. An unreadable feature status, and rent or balance output that is not a number, stop `check`.
+   - A failing `program dump` is refused, and so is a program id that isn't a program. An unreadable feature status stops `check`, after the on-chain code line has been printed. So does a rent, balance or data length that is not a plain decimal integer in range (a leading zero, 2^63-1, above 10 MiB).
    - On a third instance, `apply` from 403,520 bytes extends by 9,008 and deploys, and a second `apply` is a no-op. Then a key that is not the upgrade authority extends it by 1 byte: `check` still says "already upgraded".
    - Third-party extends before the upgrade: after a 1-byte extend, `apply` extends by 9,007 and deploys. After an extend to 412,628 bytes, `apply` deploys without extending. Both end upgraded.
    - The artifact is overwritten in `target/deploy/` after the checks have passed: `apply` still deploys its verified private copy, and the on-chain code is `a2ae4c9c…`.
@@ -94,7 +94,7 @@ cd ~/X1_PROJECTS/X1_FundNFT     # the reviewed commit, after target/deploy/fund_
 REHEARSE_SCRATCH=/tmp/fund-rehearsal \
   EXPECT_NEW_SHA=a2ae4c9cedeb413a274dd93c7afb095ad88a6082d40f4f0aad4a53f7cab13388 \
   bash scripts/rehearse-upgrade-local.sh
-# last line: upgrade rehearsal: 194 passed, 0 failed (...)
+# last line: upgrade rehearsal: 210 passed, 0 failed (...)
 ```
 
 ## Steps
@@ -137,10 +137,11 @@ bash scripts/upgrade-withdraw-native.sh check
   - current build, data length 412,528 or more: `state: extended`. An earlier run stopped after the extend, or someone else extended. Deploy only.
   - new build `a2ae4c9c…`: `state: upgraded`. Nothing to do.
   - anything else: `state: refuse`.
+- The line `PASS: on-chain code authenticated (…): … (state: …)` is printed as soon as the dump is classified, before the feature status, buffers, rent and balance are read.
 - It reads whether SIMD-0431 is active (`solana feature status`, read-only) and prints the result. If it is active or pending, the extend is at least 10,240 bytes. If the status can't be read, `check` stops.
 - Leftover buffers owned by the authority are listed with their close commands. This is a warning, not a failure.
 - The `DEPLOYER` balance covers: extend rent for the planned extend (if any) + temporary buffer rent + a 0.05 XNT fee margin. All rent values come from `getMinimumBalanceForRentExemption`. From 403,520 bytes with a 9,008-byte extend this is 2,985,038,960 lamports, about 2.99 XNT.
-- Every number it reads from the CLI (rent, balance, data length) must be a decimal integer, or `check` stops and names the command.
+- Every number it reads from the CLI (rent, balance, data length) must be a plain decimal integer: no leading zero, at most 18 digits, and a length at most 10 MiB. Otherwise `check` stops and names the command.
 
 Read the whole output. The last line must be `check: N passed, 0 failed (state: extend)`. `state: extended` is also fine: the code is still the current build and ProgramData is already long enough, because an earlier run or someone else extended it.
 
@@ -215,24 +216,101 @@ head -c 403520 /tmp/fund_nft-rolled-back.so | sha256sum    # d7606fcf...
 After a rollback:
 - `withdraw_native` is unknown again. XNT on the fund PDA stays there until the next upgrade.
 - `bash scripts/upgrade-withdraw-native.sh check` reports `state: extended`, and a later `apply` deploys the new build without extending.
-- If the rollback deploy fails part-way, the buffer commands under "If `apply` stops part-way" apply to it too.
+
+### If the rollback deploy fails part-way
+
+**Never run `apply` to recover a rollback.** `apply` deploys the new build, so it would upgrade again. Don't use the recovery commands `apply` prints either: they name the new artifact.
+
+A deploy command that exited non-zero does not prove which build is live. First classify the live code:
+
+```sh
+C=$(mktemp)
+URL='https://rpc.mainnet.x1.xyz'
+PROGRAM_ID='6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM'
+solana -C "$C" genesis-hash --url "$URL"    # 4SvBP3omtvcCVWdxq1zBY5cDp4wndjsThb6nEMn6iMdN
+solana -C "$C" program show "$PROGRAM_ID" --url "$URL" --output json | jq -r '.dataLen, .authority'
+# line 1: the data length. line 2: HffqrD7V3SK5e15cALv2tJAZKUJN2FGrxBq72kvnmWGj
+solana -C "$C" program dump "$PROGRAM_ID" "$HOME/fund_nft-live.dump" --url "$URL"
+stat -c %s "$HOME/fund_nft-live.dump"       # must equal the data length above
+# Old build?
+head -c 403520 "$HOME/fund_nft-live.dump" | sha256sum
+# d7606fcf12fb6489a95b3c7c2601725a53a37b6491b2521c0a9287db48cd2c47
+tail -c +403521 "$HOME/fund_nft-live.dump" | tr -d '\0' | wc -c     # 0
+# New build?
+head -c 412528 "$HOME/fund_nft-live.dump" | sha256sum
+# a2ae4c9cedeb413a274dd93c7afb095ad88a6082d40f4f0aad4a53f7cab13388
+tail -c +412529 "$HOME/fund_nft-live.dump" | tr -d '\0' | wc -c     # 0
+```
+
+- **Old build** (the first pair matches: hash `d7606fcf…` and `0`): the rollback landed. Nothing more to deploy. Close the leftover buffer, if any, as below.
+- **New build** (the second pair matches): the rollback did not land. Continue below.
+- **Neither**: stop and ask the lead.
+
+List the buffers. The rollback buffer is the one whose address the failed deploy printed:
+
+```sh
+solana -C "$C" program show --buffers \
+  --buffer-authority HffqrD7V3SK5e15cALv2tJAZKUJN2FGrxBq72kvnmWGj --url "$URL"
+```
+
+Then do one of these. Both deploy the same old artifact, and both start with its hash:
+
+```sh
+sha256sum "$HOME/fund_nft-pre-upgrade.so"
+# must print d7606fcf12fb6489a95b3c7c2601725a53a37b6491b2521c0a9287db48cd2c47
+
+# A. Resume with the recovered buffer (the 12-word phrase the failed deploy printed).
+solana-keygen -C "$C" recover -o "$HOME/rollback-buffer.json"
+solana -C "$C" program deploy "$HOME/fund_nft-pre-upgrade.so" --buffer "$HOME/rollback-buffer.json" \
+  --program-id "$PROGRAM_ID" --keypair "$DEPLOYER" --upgrade-authority "$DEPLOYER" \
+  --url "$URL" --with-compute-unit-price 1000
+
+# B. Or close only the rollback buffer (its XNT comes back), then deploy again.
+solana -C "$C" program close <ROLLBACK_BUFFER> --keypair "$DEPLOYER" --url "$URL"
+solana -C "$C" program deploy "$HOME/fund_nft-pre-upgrade.so" \
+  --program-id "$PROGRAM_ID" --keypair "$DEPLOYER" --upgrade-authority "$DEPLOYER" \
+  --url "$URL" --with-compute-unit-price 1000
+```
+
+Afterwards run the classification again. The old-build pair must match.
 
 If the step 0 file is missing, the same build can be rebuilt from `git archive acb6953` (see "What gets deployed"). Check its sha256 before deploying it.
 
 ## If the script refuses: manual deploy
 
-Use this only when `check` fails for a reason you understand and that is not about the code: for example the script's toolchain or feature-status check fails on a newer CLI, while the artifact, cluster, key and authority checks all pass. If `check` says the on-chain code is unknown (`state: refuse`), don't deploy. Ask the lead.
+Use this only when both of these hold:
+- `check` printed `PASS: on-chain code authenticated (old)` or `(old+zero)`, and every artifact, cluster, key and authority line is a PASS.
+- `check` then stopped for a reason you understand and that is not about the code: for example the toolchain or feature-status check fails on a newer CLI.
+
+If that PASS line is missing, or `check` says the on-chain code is unknown (`state: refuse`), don't deploy. Ask the lead.
+
+Then authenticate the live code yourself, right before the deploy. Do not deploy if any of these differ:
+
+```sh
+C=$(mktemp)
+URL='https://rpc.mainnet.x1.xyz'
+PROGRAM_ID='6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM'
+solana -C "$C" genesis-hash --url "$URL"    # 4SvBP3omtvcCVWdxq1zBY5cDp4wndjsThb6nEMn6iMdN
+solana -C "$C" program show "$PROGRAM_ID" --url "$URL" --output json | jq -r '.dataLen, .authority'
+# line 1: the data length. line 2: HffqrD7V3SK5e15cALv2tJAZKUJN2FGrxBq72kvnmWGj
+solana -C "$C" program dump "$PROGRAM_ID" "$HOME/fund_nft-live.dump" --url "$URL"
+stat -c %s "$HOME/fund_nft-live.dump"       # must equal the data length above
+head -c 403520 "$HOME/fund_nft-live.dump" | sha256sum
+# must print d7606fcf12fb6489a95b3c7c2601725a53a37b6491b2521c0a9287db48cd2c47
+tail -c +403521 "$HOME/fund_nft-live.dump" | tr -d '\0' | wc -c
+# must print 0 (every byte after the build is zero)
+```
+
+Only then, the artifact and the deploy:
 
 ```sh
 sha256sum target/deploy/fund_nft.so
 # must print a2ae4c9cedeb413a274dd93c7afb095ad88a6082d40f4f0aad4a53f7cab13388
 cp target/deploy/fund_nft.so "$HOME/fund_nft-new.so" && sha256sum "$HOME/fund_nft-new.so"   # the same hash
-C=$(mktemp)
-solana -C "$C" genesis-hash --url https://rpc.mainnet.x1.xyz    # 4SvBP3omtvcCVWdxq1zBY5cDp4wndjsThb6nEMn6iMdN
 solana -C "$C" program deploy "$HOME/fund_nft-new.so" \
-  --program-id 6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM \
+  --program-id "$PROGRAM_ID" \
   --keypair "$DEPLOYER" --upgrade-authority "$DEPLOYER" \
-  --url https://rpc.mainnet.x1.xyz --with-compute-unit-price 1000
+  --url "$URL" --with-compute-unit-price 1000
 ```
 
 `program deploy` extends ProgramData itself when it is too small (rehearsed on Agave 4.1.2). Then run "Post-upgrade checks".
