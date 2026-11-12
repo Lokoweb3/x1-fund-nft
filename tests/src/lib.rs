@@ -680,6 +680,18 @@ fn cloned_usdc_test_pool_create_deposit_dca_withdraw() {
         creator_nft,
         &[quote_vault, target_vault],
     );
+    check_withdraw_native_adversarial(
+        &program,
+        &rpc,
+        &payer,
+        &stranger,
+        fund,
+        nft_mint.pubkey(),
+        creator_nft,
+        &[quote_vault, target_vault],
+        fund_params(usdc, test_mint, window, 500),
+        test_mint,
+    );
     drop(validator);
 }
 
@@ -964,6 +976,351 @@ fn check_withdraw_native_flow(
     assert_eq!(&data_after[..reserialized.len()], &reserialized[..]);
     let owner = rpc.get_account(&fund).unwrap().owner;
     assert_eq!(owner, PROGRAM_ID, "fund still owned by the program");
+}
+
+/// Adversarial `withdraw_native` cases from the independent review of
+/// 328bf19, plus a second fund. Runs after `check_withdraw_native_flow`, so
+/// the fund starts at its rent-exempt minimum.
+///
+/// - A1: a System transfer in and a withdrawal in one transaction.
+/// - A2: two withdrawals in one transaction that together exceed what is
+///   available fail atomically; A2b: two that sum to exactly it succeed.
+/// - A3: the holder is named but does not sign (a stranger pays).
+/// - A4: the fund is passed read-only. A5: the holder is passed read-only.
+/// - A6: a stranger passes a fund vault as `nft_account`.
+/// - A7: a stranger passes another mint as `nft_mint`.
+/// - A8: a stranger pays the fee, the holder co-signs and is credited exactly
+///   the amount.
+/// - Cross-fund: the holder of fund A's NFT cannot take lamports from fund B,
+///   and the holder of fund B's NFT cannot take them from fund A.
+#[allow(clippy::too_many_arguments)]
+fn check_withdraw_native_adversarial(
+    program: &ProgramClient,
+    rpc: &solana_client::rpc_client::RpcClient,
+    payer: &Keypair,
+    stranger: &Keypair,
+    fund: Pubkey,
+    nft_mint: Pubkey,
+    creator_nft: Pubkey,
+    vaults: &[Pubkey],
+    fund_b_params: CreateFundParams,
+    fund_b_target_mint: Pubkey,
+) {
+    let holder = payer.pubkey();
+    let classic = fund_nft::NFT_TOKEN_PROGRAM_ID;
+    let data_before = account_data(rpc, &fund);
+    let rent_minimum = rpc
+        .get_minimum_balance_for_rent_exemption(data_before.len())
+        .unwrap();
+    assert_eq!(
+        rpc.get_balance(&fund).unwrap(),
+        rent_minimum,
+        "the adversarial cases start at the rent minimum"
+    );
+    let vault_balances = |rpc: &solana_client::rpc_client::RpcClient| -> Vec<u64> {
+        vaults
+            .iter()
+            .map(|v| token_amount(&account_data(rpc, v)))
+            .collect()
+    };
+    let vaults_before = vault_balances(rpc);
+    // One withdraw_native instruction, to compose and to tamper with.
+    // Account order: holder, fund, nft_mint, nft_account, nft_token_program.
+    let wn_ix = |accounts: fund_nft::accounts::WithdrawNative, amount: u64| -> Instruction {
+        let mut ixs = program
+            .request()
+            .accounts(accounts)
+            .args(fund_nft::instruction::WithdrawNative { amount })
+            .instructions();
+        assert_eq!(ixs.len(), 1);
+        ixs.pop().unwrap()
+    };
+    let holder_ix =
+        |amount: u64| wn_ix(withdraw_native_accounts(holder, fund, nft_mint, creator_nft), amount);
+    let stranger_client = Client::new_with_options(
+        Cluster::Custom(LOCAL.into(), "ws://127.0.0.1:19000".into()),
+        stranger,
+        CommitmentConfig::confirmed(),
+    );
+    let stranger_program = stranger_client.program(PROGRAM_ID).unwrap();
+
+    // A1: transfer in and withdraw in the same transaction.
+    program
+        .request()
+        .instruction(system_transfer(&holder, &fund, 7))
+        .instruction(holder_ix(7))
+        .send()
+        .expect("A1: System transfer + withdraw_native in one transaction");
+    assert_eq!(rpc.get_balance(&fund).unwrap(), rent_minimum, "A1");
+
+    // A2: two withdrawals in one transaction that together exceed what is
+    // available. The second fails, and the whole transaction with it.
+    let a2 = program
+        .request()
+        .instruction(system_transfer(&holder, &fund, 10))
+        .instruction(holder_ix(6))
+        .instruction(holder_ix(5))
+        .send();
+    expect_fund_error(
+        a2,
+        fund_nft::FundError::NativeAboveAvailable,
+        "A2: two withdrawals above what is available",
+    );
+    assert_eq!(
+        rpc.get_balance(&fund).unwrap(),
+        rent_minimum,
+        "A2 is atomic: not even the transfer in landed"
+    );
+    // A2b: two withdrawals that together equal what is available.
+    program
+        .request()
+        .instruction(system_transfer(&holder, &fund, 11))
+        .instruction(holder_ix(6))
+        .instruction(holder_ix(5))
+        .send()
+        .expect("A2b: two withdrawals summing to what is available");
+    assert_eq!(rpc.get_balance(&fund).unwrap(), rent_minimum, "A2b");
+
+    // 1_000 lamports stay available for the cases that must fail.
+    program
+        .request()
+        .instruction(system_transfer(&holder, &fund, 1_000))
+        .send()
+        .expect("fund the negative cases");
+    let funded = rent_minimum + 1_000;
+
+    // A3: the real holder is named but does not sign; a stranger pays.
+    let mut ix = holder_ix(1_000);
+    ix.accounts[0].is_signer = false;
+    let a3 = stranger_program.request().instruction(ix).send();
+    expect_anchor_error(
+        a3,
+        anchor_lang::error::ErrorCode::AccountNotSigner,
+        "A3: holder not signing",
+    );
+    // A4: the fund is passed read-only.
+    let mut ix = holder_ix(1_000);
+    ix.accounts[1].is_writable = false;
+    let a4 = program.request().instruction(ix).send();
+    expect_anchor_error(
+        a4,
+        anchor_lang::error::ErrorCode::ConstraintMut,
+        "A4: fund read-only",
+    );
+    // A5: the holder signs but is passed read-only (the stranger pays).
+    let mut ix = holder_ix(1_000);
+    ix.accounts[0].is_writable = false;
+    let a5 = stranger_program
+        .request()
+        .instruction(ix)
+        .signer(payer)
+        .send();
+    expect_anchor_error(
+        a5,
+        anchor_lang::error::ErrorCode::ConstraintMut,
+        "A5: holder read-only",
+    );
+    // A6: a stranger signs as holder and passes a fund vault as nft_account.
+    let a6 = stranger_program
+        .request()
+        .instruction(wn_ix(
+            withdraw_native_accounts(stranger.pubkey(), fund, nft_mint, vaults[0]),
+            1_000,
+        ))
+        .send();
+    expect_fund_error(
+        a6,
+        fund_nft::FundError::BadNft,
+        "A6: a vault as nft_account",
+    );
+    // A7: a stranger signs as holder and passes another mint as nft_mint.
+    let a7 = stranger_program
+        .request()
+        .instruction(wn_ix(
+            withdraw_native_accounts(stranger.pubkey(), fund, fund_b_target_mint, creator_nft),
+            1_000,
+        ))
+        .send();
+    expect_fund_error(
+        a7,
+        fund_nft::FundError::BadNft,
+        "A7: another mint as nft_mint",
+    );
+    assert_eq!(
+        rpc.get_balance(&fund).unwrap(),
+        funded,
+        "the refused cases moved nothing"
+    );
+
+    // A8: a stranger pays the fee; the holder co-signs and is credited
+    // exactly the amount.
+    let holder_before = rpc.get_balance(&holder).unwrap();
+    stranger_program
+        .request()
+        .instruction(holder_ix(1_000))
+        .signer(payer)
+        .send()
+        .expect("A8: holder co-signs, a stranger pays the fee");
+    assert_eq!(
+        rpc.get_balance(&holder).unwrap(),
+        holder_before + 1_000,
+        "A8: the holder receives exactly the amount"
+    );
+    assert_eq!(rpc.get_balance(&fund).unwrap(), rent_minimum, "A8");
+
+    // Cross-fund. The stranger creates fund B and holds its NFT.
+    let nft_mint_b = Keypair::new();
+    let (fund_b, _) =
+        Pubkey::find_program_address(&[b"fund", nft_mint_b.pubkey().as_ref()], &PROGRAM_ID);
+    let stranger_nft_b = ata(&stranger.pubkey(), &nft_mint_b.pubkey(), &classic);
+    let quote_mint = fund_b_params.targets[0].mint;
+    stranger_program
+        .request()
+        .accounts(fund_nft::accounts::CreateFund {
+            creator: stranger.pubkey(),
+            fund: fund_b,
+            nft_mint: nft_mint_b.pubkey(),
+            creator_nft_account: stranger_nft_b,
+            quote_mint,
+            token_program: classic,
+            associated_token_program: spl_associated_token_account_interface::program::ID,
+            system_program: System::id(),
+        })
+        .accounts(AccountMeta::new_readonly(fund_b_target_mint, false))
+        .args(fund_nft::instruction::CreateFund {
+            params: fund_b_params,
+        })
+        .signer(&nft_mint_b)
+        .send()
+        .expect("create fund B");
+    assert_ne!(fund_b, fund);
+    assert_eq!(token_amount(&account_data(rpc, &stranger_nft_b)), 1);
+    let data_b_before = account_data(rpc, &fund_b);
+    let rent_minimum_b = rpc
+        .get_minimum_balance_for_rent_exemption(data_b_before.len())
+        .unwrap();
+    assert_eq!(rpc.get_balance(&fund_b).unwrap(), rent_minimum_b);
+    program
+        .request()
+        .instruction(system_transfer(&holder, &fund, 5_000))
+        .instruction(system_transfer(&holder, &fund_b, 5_000))
+        .send()
+        .expect("System transfers to fund A and fund B");
+
+    // The holder of NFT A against fund B: with A's mint and account, with
+    // B's mint and A's account, and with B's mint and B's account (which the
+    // holder of A does not own).
+    for (nft_mint_arg, nft_account_arg, what) in [
+        (nft_mint, creator_nft, "holder of NFT A on fund B with NFT A"),
+        (
+            nft_mint_b.pubkey(),
+            creator_nft,
+            "holder of NFT A on fund B with mint B and account A",
+        ),
+        (
+            nft_mint_b.pubkey(),
+            stranger_nft_b,
+            "holder of NFT A on fund B with the NFT B account of someone else",
+        ),
+    ] {
+        let tried = program
+            .request()
+            .instruction(wn_ix(
+                withdraw_native_accounts(holder, fund_b, nft_mint_arg, nft_account_arg),
+                1,
+            ))
+            .send();
+        expect_fund_error(tried, fund_nft::FundError::BadNft, what);
+    }
+    // And the other way round: the holder of NFT B against fund A.
+    for (nft_mint_arg, nft_account_arg, what) in [
+        (
+            nft_mint_b.pubkey(),
+            stranger_nft_b,
+            "holder of NFT B on fund A with NFT B",
+        ),
+        (
+            nft_mint,
+            stranger_nft_b,
+            "holder of NFT B on fund A with mint A and account B",
+        ),
+    ] {
+        let tried = stranger_program
+            .request()
+            .instruction(wn_ix(
+                withdraw_native_accounts(stranger.pubkey(), fund, nft_mint_arg, nft_account_arg),
+                1,
+            ))
+            .send();
+        expect_fund_error(tried, fund_nft::FundError::BadNft, what);
+    }
+    assert_eq!(
+        rpc.get_balance(&fund).unwrap(),
+        rent_minimum + 5_000,
+        "cross-fund attempts moved nothing from fund A"
+    );
+    assert_eq!(
+        rpc.get_balance(&fund_b).unwrap(),
+        rent_minimum_b + 5_000,
+        "cross-fund attempts moved nothing from fund B"
+    );
+    // Each holder can take exactly their own fund's lamports.
+    stranger_program
+        .request()
+        .instruction(wn_ix(
+            withdraw_native_accounts(
+                stranger.pubkey(),
+                fund_b,
+                nft_mint_b.pubkey(),
+                stranger_nft_b,
+            ),
+            5_000,
+        ))
+        .send()
+        .expect("holder of NFT B withdraws from fund B");
+    program
+        .request()
+        .instruction(holder_ix(5_000))
+        .send()
+        .expect("holder of NFT A withdraws from fund A");
+    assert_eq!(rpc.get_balance(&fund).unwrap(), rent_minimum);
+    assert_eq!(rpc.get_balance(&fund_b).unwrap(), rent_minimum_b);
+
+    assert_eq!(
+        account_data(rpc, &fund),
+        data_before,
+        "fund A data unchanged by the adversarial cases"
+    );
+    assert_eq!(
+        account_data(rpc, &fund_b),
+        data_b_before,
+        "fund B data unchanged"
+    );
+    assert_eq!(
+        vault_balances(rpc),
+        vaults_before,
+        "vault balances unchanged"
+    );
+}
+
+/// The transaction must fail with this Anchor framework error.
+fn expect_anchor_error<T: std::fmt::Debug, E: std::fmt::Debug>(
+    result: Result<T, E>,
+    expected: anchor_lang::error::ErrorCode,
+    what: &str,
+) {
+    let name = format!("{expected:?}");
+    let code = u32::from(expected);
+    let err = match result {
+        Ok(ok) => panic!("{what}: expected {name} ({code}), got success {ok:?}"),
+        Err(err) => format!("{err:?}"),
+    };
+    assert!(
+        err.contains(&format!("Error Code: {name}"))
+            || err.contains(&format!("Custom({code})"))
+            || err.contains(&format!("custom program error: 0x{code:x}")),
+        "{what}: expected {name} ({code}), got {err}"
+    );
 }
 
 type ProgramClient<'a> = anchor_client::Program<&'a Keypair>;
