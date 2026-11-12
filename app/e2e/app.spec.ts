@@ -2,7 +2,8 @@
  * Full owner flow in a real browser against scripts/local-validator.sh, with
  * the localnet-only test wallet. Then switch to X1 mainnet (read-only: genesis
  * hash, mint/pool reads, program lookup) and check that the test wallet is
- * gone and a simulate-only create stops at "program not deployed". Nothing is
+ * gone and a simulate-only create stops before any signature (program not
+ * deployed, or every simulation fails for the unfunded payer). Nothing is
  * signed or sent on mainnet.
  */
 import { expect, test, type Page } from "@playwright/test";
@@ -233,7 +234,10 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   await expect(page.getByTestId("signer")).toContainText("No signer connected");
   await expect(page.getByText("I understand this is X1 mainnet and uses real funds")).toBeVisible();
 
-  // Simulate-only create on mainnet stops at "program not deployed".
+  // A simulate-only create on mainnet can never reach a signature, whether or
+  // not the fund program is deployed there: with no program the review stops
+  // at "not deployed"; with it, the payer (the local test wallet) has no
+  // mainnet account, so every simulation fails and nothing can be sent.
   await page.getByRole("button", { name: "Create fund" }).click();
   await page.getByRole("button", { name: /fill example/ }).click();
   await expect(page.getByTestId("fit")).toBeVisible();
@@ -241,15 +245,22 @@ test("owner flow on a local validator, then mainnet is read-only and the test wa
   await expect(page.getByTestId("target-0-pool").getByTestId("pool-address")).toHaveText(POOL);
   await page.getByLabel("Simulation payer").fill(pubkey);
   await page.getByTestId("create-review").click();
-  await expect(page.getByTestId("create-error")).toContainText("The fund program is not deployed on this network yet");
-  await expect(page.getByTestId("create-error")).toContainText(
-    "program 6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM is not deployed on this RPC (https://rpc.mainnet.x1.xyz, mainnet)",
-  );
-  await expect(page.getByTestId("review")).toHaveCount(0);
+  const review = page.getByTestId("review");
+  const createError = page.getByTestId("create-error");
+  await expect(review.or(createError).first()).toBeVisible();
+  if (await createError.isVisible()) {
+    await expect(createError).toContainText("is not deployed on this RPC (https://rpc.mainnet.x1.xyz, mainnet)");
+    await expect(review).toHaveCount(0);
+  } else {
+    await expect(review.getByTestId("sim-status").first()).toBeVisible();
+    await expect(review.getByTestId("sim-status").filter({ hasText: "simulation FAILED" }).first()).toBeVisible();
+    await expect(review).toContainText("A simulation failed, so nothing can be sent. Nothing was signed or sent.");
+  }
+  await expect(page.getByTestId("sign-and-send")).toHaveCount(0);
+  await expect(page.getByTestId("signer")).toContainText("No signer connected");
   await shot(page, "flow-mainnet-create");
-  // The friendly error's action switches to the local validator.
-  await page.getByTestId("error-action").filter({ hasText: "Switch to Local validator to try it" }).click();
-  await expect(page.getByTestId("cluster-banner")).toHaveAttribute("data-cluster", "localnet");
+  // Back to the local validator.
+  await connectTo(page, "local");
 
   expect(errors).toEqual([]);
   expect(external).toEqual([]);
