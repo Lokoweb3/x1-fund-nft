@@ -7,7 +7,9 @@
     "keeper": "tsx src/index.ts",
     "cli": "tsx src/cli.ts",
     "test": "tsx --test test/*.test.ts",
-    "e2e": "bash test/e2e-local.sh"
+    "e2e": "bash test/e2e-local.sh",
+    "e2e:inscribe": "bash test/inscribe-e2e.sh",
+    "simulate:inscribe": "tsx test/inscribe-simulate.ts"
   },
   "dependencies": {
     "@anchor-lang/core": "1.2.2",
