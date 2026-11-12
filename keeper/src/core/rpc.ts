@@ -470,12 +470,25 @@ export interface NativeBalance {
   available: bigint;
 }
 
+/** A lamport count from the RPC as a bigint; refuses a number that may have been rounded. */
+export function exactLamports(value: number, what: string): bigint {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${what} (${value}) is too large to read exactly; use --amount <lamports>`);
+  }
+  return BigInt(value);
+}
+
 /** Native XNT on the Fund account and how much of it the holder can withdraw. */
 export async function readNativeBalance(connection: Connection, fundKey: PublicKey): Promise<NativeBalance> {
   const info = await connection.getAccountInfo(fundKey, "confirmed");
   if (!info) throw new Error(`fund ${fundKey.toBase58()} does not exist`);
-  const lamports = BigInt(info.lamports);
-  const rentMinimum = BigInt(await connection.getMinimumBalanceForRentExemption(info.data.length, "confirmed"));
+  // web3.js parses lamports as a JS number. Above 2^53 - 1 it may already be
+  // rounded, and `all` must never compute from a rounded balance.
+  const lamports = exactLamports(info.lamports, `fund ${fundKey.toBase58()} balance`);
+  const rentMinimum = exactLamports(
+    await connection.getMinimumBalanceForRentExemption(info.data.length, "confirmed"),
+    "rent-exempt minimum",
+  );
   return { lamports, dataLength: info.data.length, rentMinimum, available: nativeAvailable(lamports, rentMinimum) };
 }
 

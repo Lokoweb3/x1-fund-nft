@@ -40,6 +40,7 @@ import {
   TOKEN_PROGRAM_ID,
   type PoolAccounts,
 } from "../src/pool.js";
+import { exactLamports, readNativeBalance } from "../src/core/rpc.js";
 
 const require = createRequire(import.meta.url);
 const { AnchorProvider, Wallet } = require("@anchor-lang/core") as typeof import("@anchor-lang/core");
@@ -594,4 +595,26 @@ test("withdraw_native builder names the program's accounts in IDL order", async 
   assert.equal(native?.code, 6054);
   assert.equal(errors.find((e) => e.name === "PayerChanged")?.code, 6053);
   assert.equal(Math.max(...errors.map((e) => e.code)), 6054);
+});
+
+test("readNativeBalance refuses lamport counts a JS number cannot hold exactly", async () => {
+  const fund = Keypair.generate().publicKey;
+  const fake = (lamports: number, rent: number) =>
+    ({
+      getAccountInfo: async () => ({ lamports, data: Buffer.alloc(755), owner: PROGRAM_ID, executable: false }),
+      getMinimumBalanceForRentExemption: async () => rent,
+    }) as unknown as Connection;
+  const max = Number.MAX_SAFE_INTEGER; // 2^53 - 1
+  const ok = await readNativeBalance(fake(max, 6_145_680), fund);
+  assert.equal(ok.lamports, 9_007_199_254_740_991n);
+  assert.equal(ok.rentMinimum, 6_145_680n);
+  assert.equal(ok.available, 9_007_199_254_740_991n - 6_145_680n);
+  assert.equal(ok.dataLength, 755);
+  // 2^53 + 1 is not representable; the parsed number is already rounded.
+  await assert.rejects(readNativeBalance(fake(2 ** 53 + 1, 6_145_680), fund), /too large to read exactly; use --amount <lamports>/);
+  await assert.rejects(readNativeBalance(fake(2 ** 53, 6_145_680), fund), /too large to read exactly/);
+  await assert.rejects(readNativeBalance(fake(10_000_000, 2 ** 53 + 1), fund), /rent-exempt minimum .* too large/);
+  assert.equal(exactLamports(0, "x"), 0n);
+  assert.throws(() => exactLamports(-1, "x"), /too large to read exactly/);
+  assert.throws(() => exactLamports(1.5, "x"), /too large to read exactly/);
 });
