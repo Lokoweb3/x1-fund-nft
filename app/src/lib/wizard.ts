@@ -5,7 +5,7 @@
  * rest.
  */
 import { PublicKey } from "@solana/web3.js";
-import { BPS_SUM, MIN_INTERVAL_SECS, type TargetSpec } from "@core/owner.js";
+import { BPS_SUM, I64_MAX, MAX_DEV_BPS, MIN_INTERVAL_SECS, parseUint, type TargetSpec } from "@core/owner.js";
 
 /**
  * "80", "80.5", "33.33" -> basis points (8000, 8050, 3333), exactly, with
@@ -146,3 +146,31 @@ export function project(deposit: bigint, perRun: bigint, intervalSecs: bigint, t
   if (buys === 0) return undefined;
   return { buys, seconds: (buys - 1) * Number(intervalSecs), spentPerRound };
 }
+
+/**
+ * The schedule text ("3600", or the custom seconds) as a validated interval:
+ * a whole number of seconds, at least MIN_INTERVAL_SECS, that fits an i64.
+ * undefined for anything else ("60.5", "Infinity", "", "-1", "1e3"). The
+ * wizard renders only from this, never from the raw text.
+ */
+export function parseIntervalSecs(text: string): bigint | undefined {
+  try {
+    const v = parseUint(text.trim(), "how often", I64_MAX);
+    return v >= MIN_INTERVAL_SECS ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export const INTERVAL_INVALID = `Enter a whole number of seconds, at least ${MIN_INTERVAL_SECS} (no decimals).`;
+
+/** Max deviation text as validated basis points: a whole number from 0 to MAX_DEV_BPS, else undefined. */
+export function parseMaxDevBps(text: string): number | undefined {
+  try {
+    return Number(parseUint(text.trim(), "the max deviation", BigInt(MAX_DEV_BPS)));
+  } catch {
+    return undefined;
+  }
+}
+
+export const MAX_DEV_INVALID = `Enter a whole number of basis points from 0 to ${MAX_DEV_BPS} (300 bps = 3%).`;

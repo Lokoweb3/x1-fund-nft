@@ -133,6 +133,8 @@ export type Depth = "ok" | "thin" | "too thin" | "empty";
  * `slice` is the largest single buy (per round x target share), raw units.
  */
 export function poolDepth(quoteReserve: bigint | undefined, slice: bigint, maxDevBps: number): Depth {
+  // A clear error instead of BigInt's RangeError for 3.5, NaN or Infinity. Callers pass a parsed integer.
+  if (!Number.isSafeInteger(maxDevBps) || maxDevBps < 0) throw new Error(`max deviation must be a non-negative whole number of bps, got ${maxDevBps}`);
   if (quoteReserve === undefined || quoteReserve === 0n) return "empty";
   if (slice <= 0n) return "ok";
   // slice / reserve > maxDev / 2 / 10_000  <=>  slice * 20_000 > reserve * maxDev

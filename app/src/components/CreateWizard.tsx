@@ -35,7 +35,20 @@ import { useMintLookup, usePools } from "../lib/lookups";
 import type { NetworkInfo } from "../lib/network";
 import { signerId } from "../lib/session";
 import { labelFor, type TokenLabel } from "../lib/tokens";
-import { bpsToPercent, FREQUENCIES, humanDuration, humanInterval, MIN_CUSTOM_SECS, percentToBps, project, splitToTargets } from "../lib/wizard";
+import {
+  bpsToPercent,
+  FREQUENCIES,
+  humanDuration,
+  humanInterval,
+  INTERVAL_INVALID,
+  MAX_DEV_INVALID,
+  MIN_CUSTOM_SECS,
+  parseIntervalSecs,
+  parseMaxDevBps,
+  percentToBps,
+  project,
+  splitToTargets,
+} from "../lib/wizard";
 import { ArtStep, type ArtResult } from "./ArtStep";
 import { MintInput } from "./MintInput";
 import { ReviewPanel } from "./ReviewPanel";
@@ -150,7 +163,8 @@ export function CreateWizard({ s }: { s: AppState }) {
       return undefined;
     }
   }, [perRun, quoteInfo]);
-  const maxDevNum = Number(maxDev) || 0;
+  // Render only from these validated integers, never from the raw text.
+  const intervalSecs = useMemo(() => parseIntervalSecs(interval), [interval]);
 
   const split = useMemo(() => {
     if (!quoteInfo) return { error: "choose the pay-with token" };
@@ -172,7 +186,9 @@ export function CreateWizard({ s }: { s: AppState }) {
     try {
       if (!quoteInfo) throw new Error(quoteLookup.status === "error" || quoteLookup.status === "invalid" ? quoteLookup.message : "choose the token you pay with");
       if (split.error || !split.value) throw new Error(split.error);
-      if (freq === "custom" && !(Number(customSecs) >= MIN_CUSTOM_SECS)) throw new Error(`a custom schedule must be at least ${MIN_CUSTOM_SECS} seconds`);
+      if (freq === "custom" && parseIntervalSecs(customSecs) === undefined) {
+        throw new Error(`a custom schedule must be a whole number of seconds, at least ${MIN_CUSTOM_SECS}`);
+      }
       const args: CreateFundArgs = {
         quote: quoteInfo.address,
         targets: split.value.targets,
@@ -213,15 +229,15 @@ export function CreateWizard({ s }: { s: AppState }) {
   );
 
   const projection = useMemo(() => {
-    if (!quoteInfo || !perRunRaw || !split.value) return undefined;
+    if (!quoteInfo || !perRunRaw || !split.value || intervalSecs === undefined) return undefined;
     try {
       const d = parseUi(deposit, quoteInfo.decimals, "deposit");
-      const p = project(d, perRunRaw, BigInt(Number(interval) || 0), split.value.targets.map((t) => ({ bps: t.bps, cash: t.mint.equals(quoteInfo.address) })));
+      const p = project(d, perRunRaw, intervalSecs, split.value.targets.map((t) => ({ bps: t.bps, cash: t.mint.equals(quoteInfo.address) })));
       return p ? { ...p, deposit: d } : undefined;
     } catch {
       return undefined;
     }
-  }, [quoteInfo, perRunRaw, split, deposit, interval]);
+  }, [quoteInfo, perRunRaw, split, deposit, intervalSecs]);
 
   const onErrorAction = (kind: ErrorAction) => {
     if (kind === "switch-local") s.switchNetwork("local");
@@ -309,7 +325,7 @@ export function CreateWizard({ s }: { s: AppState }) {
             quoteSymbol={q}
             row={r}
             slice={perRunRaw !== undefined ? (perRunRaw * BigInt(safeBps(r.percent))) / 10_000n : undefined}
-            maxDevBps={maxDevNum}
+            maxDevText={maxDev}
             onChange={(patch) => setRows((rs) => rs.map((x) => (x.id === r.id ? { ...x, ...patch } : x)))}
             onRemove={rows.length > 1 ? () => setRows((rs) => rs.filter((x) => x.id !== r.id)) : undefined}
             onReport={(rep) => setReports((m) => ({ ...m, [r.id]: rep }))}
@@ -358,23 +374,19 @@ export function CreateWizard({ s }: { s: AppState }) {
               <option value="custom">Custom...</option>
             </select>
           </label>
-          {freq === "custom" && (
-            <label className="field">
-              Every N seconds (at least {MIN_CUSTOM_SECS})
-              <input aria-label="Custom seconds" inputMode="numeric" value={customSecs} onChange={(e) => setCustomSecs(e.target.value)} />
-            </label>
-          )}
+          {freq === "custom" && <CustomSecondsField value={customSecs} onChange={setCustomSecs} />}
         </div>
         {perRunRaw !== undefined && split.value && quoteInfo && (
-          <p className="small" data-testid="per-round">
-            Every {humanInterval(BigInt(Number(interval) || 60))} the fund spends{" "}
-            {split.value.targets
-              .filter((t) => !t.mint.equals(quoteInfo.address))
-              .map((t) => `${formatUi((perRunRaw * BigInt(t.bps)) / 10_000n, quoteInfo.decimals)} ${q} on ${labels[t.mint.toBase58()]?.symbol ?? "?"}`)
-              .join(", ")}
-            {split.value.cashBps > 0 ? `; the ${bpsToPercent(split.value.cashBps)}% cash share of each round is not spent` : ""}. A keeper runs each buy for a 0.1% tip{" "}
-            <Help term="keeper" />.
-          </p>
+          <PerRoundLine
+            intervalText={interval}
+            perRunRaw={perRunRaw}
+            targets={split.value.targets}
+            cashBps={split.value.cashBps}
+            quoteMint={quoteInfo.address}
+            decimals={quoteInfo.decimals}
+            symbol={q}
+            labels={labels}
+          />
         )}
         <div className="row wrap small">
           <label>
@@ -396,11 +408,7 @@ export function CreateWizard({ s }: { s: AppState }) {
               <input aria-label="TWAP window" inputMode="numeric" value={window} onChange={(e) => setWindow(e.target.value)} />
               <span className="small muted">The fund compares each buy with the pool's average price over this window.</span>
             </label>
-            <label className="field">
-              Max deviation, bps (at most {MAX_DEV_BPS}) <Help term="slippage" />
-              <input aria-label="Max deviation" inputMode="numeric" value={maxDev} onChange={(e) => setMaxDev(e.target.value)} />
-              <span className="small muted">A buy is refused if it gets more than this below the average (300 bps = 3%).</span>
-            </label>
+            <MaxDeviationField value={maxDev} onChange={setMaxDev} />
           </div>
         </details>
 
@@ -444,6 +452,100 @@ export function CreateWizard({ s }: { s: AppState }) {
   );
 }
 
+/** The custom schedule input, with an inline message for anything that is not a whole number of seconds >= 60. */
+export function CustomSecondsField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const ok = parseIntervalSecs(value) !== undefined;
+  return (
+    <label className="field">
+      Every N seconds (at least {MIN_CUSTOM_SECS})
+      <input aria-label="Custom seconds" aria-invalid={!ok} inputMode="numeric" value={value} onChange={(e) => onChange(e.target.value)} />
+      {!ok && (
+        <span className="error small" data-testid="interval-invalid">
+          {INTERVAL_INVALID}
+        </span>
+      )}
+    </label>
+  );
+}
+
+export function MaxDeviationField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const ok = parseMaxDevBps(value) !== undefined;
+  return (
+    <label className="field">
+      Max deviation, bps (at most {MAX_DEV_BPS}) <Help term="slippage" />
+      <input aria-label="Max deviation" aria-invalid={!ok} inputMode="numeric" value={value} onChange={(e) => onChange(e.target.value)} />
+      {ok ? (
+        <span className="small muted">A buy is refused if it gets more than this below the average (300 bps = 3%).</span>
+      ) : (
+        <span className="error small" data-testid="max-dev-invalid">
+          {MAX_DEV_INVALID}
+        </span>
+      )}
+    </label>
+  );
+}
+
+/** "Every 1 hour the fund spends ...", rendered only from a validated interval. */
+export function PerRoundLine({
+  intervalText,
+  perRunRaw,
+  targets,
+  cashBps,
+  quoteMint,
+  decimals,
+  symbol,
+  labels,
+}: {
+  intervalText: string;
+  perRunRaw: bigint;
+  targets: CreateFundArgs["targets"];
+  cashBps: number;
+  quoteMint: PublicKey;
+  decimals: number;
+  symbol: string;
+  labels: Labels;
+}) {
+  const secs = parseIntervalSecs(intervalText);
+  if (secs === undefined) {
+    return (
+      <p className="small warn-text" data-testid="per-round-invalid">
+        Fix how often (above) to see what each round spends.
+      </p>
+    );
+  }
+  return (
+    <p className="small" data-testid="per-round">
+      Every {humanInterval(secs)} the fund spends{" "}
+      {targets
+        .filter((t) => !t.mint.equals(quoteMint))
+        .map((t) => `${formatUi((perRunRaw * BigInt(t.bps)) / 10_000n, decimals)} ${symbol} on ${labels[t.mint.toBase58()]?.symbol ?? "?"}`)
+        .join(", ")}
+      {cashBps > 0 ? `; the ${bpsToPercent(cashBps)}% cash share of each round is not spent` : ""}. A keeper runs each buy for a 0.1% tip <Help term="keeper" />.
+    </p>
+  );
+}
+
+/** Pool depth for one buy, computed only from a validated max deviation. */
+export function PoolDepthNote({ quoteReserve, slice, maxDevText }: { quoteReserve: bigint | undefined; slice: bigint | undefined; maxDevText: string }) {
+  if (slice === undefined) return null;
+  const maxDevBps = parseMaxDevBps(maxDevText);
+  if (maxDevBps === undefined) {
+    return (
+      <span className="warn-text" data-testid="pool-depth-unknown">
+        {" "}
+        · depth not checked: fix the max deviation (Advanced)
+      </span>
+    );
+  }
+  const depth = poolDepth(quoteReserve, slice, maxDevBps);
+  return (
+    <span className={depth === "ok" ? "" : "warn-text"} data-testid="pool-depth">
+      {" "}
+      · {DEPTH_TEXT[depth]}
+    </span>
+  );
+}
+
 function safeBps(p: string): number {
   try {
     return percentToBps(p);
@@ -467,7 +569,7 @@ function TargetRow({
   quoteSymbol,
   row,
   slice,
-  maxDevBps,
+  maxDevText,
   onChange,
   onRemove,
   onReport,
@@ -480,7 +582,7 @@ function TargetRow({
   quoteSymbol: string;
   row: BuyRow;
   slice: bigint | undefined;
-  maxDevBps: number;
+  maxDevText: string;
   onChange: (patch: Partial<BuyRow>) => void;
   onRemove?: () => void;
   onReport: (r: RowReport) => void;
@@ -509,7 +611,6 @@ function TargetRow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reportKey]);
 
-  const depth = chosen && slice !== undefined ? poolDepth(chosen.quoteReserve, slice, maxDevBps) : undefined;
   return (
     <div className="target-card" data-testid="target-row">
       <div className="row between">
@@ -538,7 +639,7 @@ function TargetRow({
             Pool <span className="mono" data-testid="pool-address">{chosen.pool.toBase58()}</span> (found on chain
             {candidates.length > 1 ? `, best of ${candidates.length}` : ""}):{" "}
             {chosen.quoteReserve === undefined ? "reserve unknown" : `${formatUi(chosen.quoteReserve, quote.decimals)} ${quoteSymbol}`} on the pay-with side
-            {depth && <span className={depth === "ok" ? "" : "warn-text"} data-testid="pool-depth"> · {DEPTH_TEXT[depth]}</span>}
+            <PoolDepthNote quoteReserve={chosen.quoteReserve} slice={slice} maxDevText={maxDevText} />
           </p>
           {candidates.length > 1 && (
             <label>
