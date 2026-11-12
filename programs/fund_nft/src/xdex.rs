@@ -13,6 +13,14 @@ use anchor_lang::prelude::*;
 
 use crate::errors::FundError;
 
+/// The only pool program `execute_dca` will call. Mainnet XDEX cp-swap owns
+/// the USDC.X/TEST pool; the X1 testnet pools are owned by the id in the XDEX
+/// IDL. Build with `--features testnet` to switch.
+#[cfg(not(feature = "testnet"))]
+pub const XDEX_PROGRAM_ID: Pubkey = pubkey!("sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN");
+#[cfg(feature = "testnet")]
+pub const XDEX_PROGRAM_ID: Pubkey = pubkey!("7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf");
+
 pub const POOL_LEN: usize = 637;
 pub const AMM_CONFIG_LEN: usize = 236;
 pub const OBSERVATION_LEN: usize = 4075;
@@ -117,6 +125,16 @@ fn pubkey_at(data: &[u8], offset: usize) -> Result<Pubkey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pool_program_allowlist_matches_the_build_feature() {
+        let expected = if cfg!(feature = "testnet") {
+            "7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf"
+        } else {
+            "sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN"
+        };
+        assert_eq!(XDEX_PROGRAM_ID.to_string(), expected);
+    }
 
     #[test]
     fn pool_offsets_round_trip() {

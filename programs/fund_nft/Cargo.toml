@@ -18,6 +18,8 @@ idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 anchor-debug = []
 custom-heap = []
 custom-panic = []
+# Pin the X1 testnet XDEX program id instead of mainnet.
+testnet = []
 
 [dependencies]
 anchor-lang = "1.2.2"

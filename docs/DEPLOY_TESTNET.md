@@ -65,7 +65,7 @@ solana program show <PROGRAM_ID> --url https://rpc.testnet.x1.xyz
 
 There is no faucet command in this repo. `solana airdrop` asks the testnet RPC. If that RPC does not airdrop, fund the deployer out of band and do not continue with a mainnet key.
 
-XDEX on testnet is a different deployment from mainnet program `sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN`. Three testnet pools checked on 2026-11-11 are owned by `7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf`, the address in the XDEX IDL. The fund program does not hard-code either id. A fund created on testnet must pin testnet pool addresses. The keeper reads the pool program from the pool account's owner.
+XDEX on testnet is a different deployment from mainnet program `sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN`. Three testnet pools checked on 2026-11-11 are owned by `7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf`, the address in the XDEX IDL. The fund program allowlists exactly one pool program. The default build allows the mainnet id; build with `--features testnet` to allow the testnet id instead (`anchor build --ignore-keys --arch v0 -- --features testnet`). A fund created on testnet must pin testnet pool addresses. The keeper reads the pool program from the pool account's owner.
 
 ## Make the program immutable
 

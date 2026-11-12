@@ -22,7 +22,7 @@ Checked on 2026-11-11 against `https://rpc.mainnet.x1.xyz` unless a row says oth
 
 The reference swap's `SwapEvent` (`sha256("event:SwapEvent")[:8] = 40c6cde8260871e2`) reports `input_amount` 200000, `output_amount` 10272680604408 (10,272.680604408 TEST), `input_transfer_fee` 0, `output_transfer_fee` 513634030221. That output fee is `ceil(output_amount * 500 / 10000)`.
 
-Pool and config discriminators match `sha256("account:PoolState")`, `account:AmmConfig`, and `account:ObservationState`. The published IDL's `metadata.address` is `7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf`, not the mainnet program. The spec said to ignore that address. The program does not hard-code either id; the caller passes the pool and the program checks it owns the pool, config, and observation.
+Pool and config discriminators match `sha256("account:PoolState")`, `account:AmmConfig`, and `account:ObservationState`. The published IDL's `metadata.address` is `7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf`, not the mainnet program. The spec said to ignore that address. `execute_dca` requires the pool program to be `sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN`, or `7EEuq61z9VKdkUzj7G36xGd7ncyz8KBtUwAWVjypYQHf` when built with the `testnet` feature, and checks that it owns the pool, config, and observation.
 
 ## Trade-fee denominator
 

@@ -66,4 +66,14 @@ pub enum FundError {
     TargetIndex,
     #[msg("The destination token account must belong to the NFT holder")]
     BadDestination,
+    #[msg("The pool program is not the allowlisted XDEX program")]
+    BadPoolProgram,
+    #[msg("The quote vault did not drop by exactly the tip plus the swap input")]
+    QuoteVaultDelta,
+    #[msg("A fund vault is no longer owned by the fund")]
+    VaultOwner,
+    #[msg("A fund vault has a delegate")]
+    VaultDelegate,
+    #[msg("A fund vault has a close authority")]
+    VaultCloseAuthority,
 }

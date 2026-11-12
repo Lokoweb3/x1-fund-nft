@@ -41,7 +41,7 @@ pub struct ExecuteDca<'info> {
     pub caller_quote_account: InterfaceAccount<'info, TokenAccount>,
     pub quote_token_program: Interface<'info, TokenInterface>,
     pub target_token_program: Interface<'info, TokenInterface>,
-    /// CHECK: must be the executable owner of the pinned pool.
+    /// CHECK: must be `xdex::XDEX_PROGRAM_ID` and the executable owner of the pinned pool.
     pub pool_program: UncheckedAccount<'info>,
     /// CHECK: decoded from the verified PoolState layout.
     #[account(mut)]
@@ -143,6 +143,10 @@ pub fn handle_execute_dca(ctx: Context<ExecuteDca>, target_index: u8) -> Result<
         xdex::read_pool(&data)?
     };
     require!(
+        ctx.accounts.pool_program.key() == xdex::XDEX_PROGRAM_ID,
+        FundError::BadPoolProgram
+    );
+    require!(
         ctx.accounts.pool_program.executable
             && ctx.accounts.pool_state.owner == &ctx.accounts.pool_program.key()
             && ctx.accounts.amm_config.owner == &ctx.accounts.pool_program.key()
@@ -218,6 +222,7 @@ pub fn handle_execute_dca(ctx: Context<ExecuteDca>, target_index: u8) -> Result<
 
     let bump_seed = [bump];
     let signer: &[&[u8]] = &[FUND_SEED, nft_mint.as_ref(), &bump_seed];
+    let quote_before = ctx.accounts.quote_vault.amount;
     if plan.tip > 0 {
         token_interface::transfer_checked(
             CpiContext::new_with_signer(
@@ -237,7 +242,24 @@ pub fn handle_execute_dca(ctx: Context<ExecuteDca>, target_index: u8) -> Result<
 
     let before_out = ctx.accounts.target_vault.amount;
     swap_base_input(&ctx, plan.amount_in, min_out, signer)?;
+    ctx.accounts.quote_vault.reload()?;
     ctx.accounts.target_vault.reload()?;
+    // The pool program receives the fund's signature. Check that it moved
+    // exactly `amount_in` out of the quote vault and left both vaults owned
+    // by the fund with no delegate and no close authority.
+    let expected_quote = quote_before
+        .checked_sub(plan.tip)
+        .and_then(|left| left.checked_sub(plan.amount_in))
+        .ok_or(FundError::Math)?;
+    require!(
+        ctx.accounts.quote_vault.amount == expected_quote,
+        FundError::QuoteVaultDelta
+    );
+    for vault in [&ctx.accounts.quote_vault, &ctx.accounts.target_vault] {
+        require!(vault.owner == fund_key, FundError::VaultOwner);
+        require!(vault.delegate.is_none(), FundError::VaultDelegate);
+        require!(vault.close_authority.is_none(), FundError::VaultCloseAuthority);
+    }
     let received = ctx
         .accounts
         .target_vault
