@@ -60,3 +60,34 @@ KEYPAIR=/path/to/payer.json RPC_URL=https://rpc.testnet.x1.xyz npx tsx src/index
 Each transaction starts with compute-budget instructions. `COMPUTE_UNIT_LIMIT` sets the unit limit (default 400000) and `PRIORITY_FEE_MICROLAMPORTS` sets the price per unit (default 0).
 
 A decode, build or send failure for one fund or target is logged with the fund address and target index, and the keeper continues with the rest. It exits non-zero if any item failed.
+
+## Owner CLI
+
+`keeper/src/cli.ts` creates a fund, deposits, withdraws, and shows a fund. Run it from `keeper/` as `npx tsx src/cli.ts <command>` or `npm run cli -- <command>`. Amounts are raw integer units; the CLI prints them in UI units too, using the mint's decimals.
+
+```sh
+# Cash slice is <quoteMint>:default:<bps>; every other target is <mint>:<XDEX pool>:<bps>.
+npx tsx src/cli.ts create-fund --quote <mint> \
+  --target <quoteMint>:default:2000 --target <mint>:<pool>:8000 \
+  --per-run <raw> --interval <secs> --window <secs> --max-dev-bps <n> --payer <pubkey>
+npx tsx src/cli.ts deposit  --fund <pda> --amount <raw>          --payer <pubkey>
+npx tsx src/cli.ts withdraw --fund <pda> --mint <mint> --amount <raw|all> --payer <pubkey>
+npx tsx src/cli.ts show     --fund <pda>
+```
+
+- `create-fund` generates the NFT mint keypair in memory and prints it with the fund PDA (`["fund", nft_mint]`). It checks the same bounds as `state.rs` before touching the network (max deviation ≤ 500 bps, window 900–86400 s, interval ≥ 60 s, weights sum to 10000, 1–8 targets, unique mints and pools, cash slice on the default pool). Every non-cash pool must exist, be owned by XDEX `sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN`, and trade exactly the quote and target mints. `--xdex <id>` overrides the XDEX id on localnet only. The non-cash target mints go in as remaining accounts in target order. Transaction 1 is `create_fund` plus an idempotent create of the fund's quote-vault ATA. Transaction 2, when there are non-cash targets, idempotently creates each target vault ATA, which `execute_dca` needs.
+- `deposit` takes from the payer's quote ATA and adds an idempotent vault-ATA create only if the vault is missing.
+- `withdraw` sends to the holder's ATA for that mint, created idempotently in the same transaction. `--amount all` withdraws the vault's whole balance. A quote withdraw shrinks the target budgets in proportion.
+- `show` decodes the fund with `keeper/src/fund.ts` and prints parameters, each target's budget, `last_run`, next due time, the NFT holder, and every vault balance. It never signs.
+
+Safety follows the keeper and reuses `keeper/src/cluster.ts`:
+
+- The default is simulate-only. Each transaction is simulated (`sigVerify: false`, `replaceRecentBlockhash: true`) and the CLI prints the program logs and compute units. Without `KEYPAIR`, give the fee payer with `--payer <pubkey>`. If the program is not deployed on the RPC, the CLI says so and stops.
+- A send needs all of `--send`, `KEYPAIR`, and `--cluster <mainnet|testnet|localnet>` matching the RPC's genesis hash; mainnet also needs `--i-understand-mainnet`. The genesis hash is checked before any keypair is loaded.
+- Before signing, the CLI prints a summary of what it will sign. It sends a transaction only after that transaction's simulation passed; if a simulation fails, nothing is sent.
+- Each transaction starts with the keeper's compute-budget instructions (`COMPUTE_UNIT_LIMIT`, `PRIORITY_FEE_MICROLAMPORTS`).
+- The RPC is `--rpc <url>`, else `RPC_URL`, else `https://rpc.mainnet.x1.xyz`.
+
+`npm test` also covers the CLI offline: argument parsing, the bounds, the remaining-account order (cash skipped), the fund PDA, the pool check, and the send gate.
+
+`bash test/e2e-local.sh` (or `npm run e2e`) runs the CLI against a loopback `solana-test-validator` on ports 18989–19030. It needs `target/deploy/fund_nft.so`, the Agave CLI, `jq`, and read access to `https://rpc.mainnet.x1.xyz` for clones. It uses the same X1 feature mode as the Rust test (set `E2E_FEATURES=agave` for Agave defaults) and clones XDEX, the USDC.X/TEST pool and X1's token programs. The quote mint is the cloned USDC.X with its mint authority overwritten to a throwaway payer, so the fund can pin TEST to the real pool. Keys and the ledger go in a temp dir under `E2E_SCRATCH` (default `$TMPDIR` or `/tmp`), deleted on exit. Every step uses `--send --cluster localnet`: create-fund, deposit, show, keeper `--dry-run`, withdraw quote, a non-holder withdraw that the program rejects with `BadNft`, and withdraw all.

@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# Local end-to-end test of the owner CLI (src/cli.ts) against a loopback
+# solana-test-validator. Nothing here touches a public network except reads:
+# account dumps, clones and `solana feature status` from X1 mainnet RPC.
+#
+#   cd keeper && bash test/e2e-local.sh
+#
+# Env:
+#   E2E_SCRATCH   parent dir for the throwaway work dir (payer keys, ledger,
+#                 logs). Default ${TMPDIR:-/tmp}. Never inside keys/.
+#   E2E_FEATURES  x1 (default): Agave defaults minus every feature X1 mainnet
+#                 reports inactive, except SIMD-0127 (same as tests/src/lib.rs).
+#                 agave: Agave defaults.
+#   E2E_KEEP=1    keep the work dir afterwards.
+#
+# The validator binds 127.0.0.1 only and uses ports 18989-19030, away from the
+# Rust test's 18999/19000/19901 and its default dynamic range.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KEEPER="$(cd "$HERE/.." && pwd)"
+REPO="$(cd "$KEEPER/.." && pwd)"
+export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+
+MAINNET_RPC="https://rpc.mainnet.x1.xyz"
+PROGRAM_ID="6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM"
+XDEX="sEsYH97wqmfnkzHedjNcw3zyJdPvUmsa9AixhS4b4fN"
+USDC="B69chRzqzDCmdB5WYB8NRu5Yv5ZA95ABiZcdzCgGm9Tq"
+TEST_MINT="C9P839X3i1ijPyCvHEg3HpbEVjBLHJdxGXjez3yVn3Rz"
+POOL="7drPqaqcXcyYmdo62xucGqZzALuPCbGBCXCT41nWMmQD"
+AMM="2eFPWosizV6nSAGeSvi5tRgXLoqhjnSesra23ALA248c"
+OBS="6EV7aqfYx15yVPdBANkaEBdLpKUkyQrC6thUAy5CCi4y"
+VAULT_0="E52PrH4XT4fTdPZMPXwtwigdQv9C2yQF8stm2EReUbHL"
+VAULT_1="Hyvb75SAvMof44331mgAhpAT59jxP2DVe9fTFXXLUoRp"
+AUTHORITY="9Dpjw2pB5kXJr6ZTHiqzEMfJPic3om9jgNacnwpLCoaU"
+TOKENKEG="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+TOKEN_2022="TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+ATA_PROGRAM="ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+X1_SYSVAR_SYSCALL_EXCEPTION="CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq"
+
+PASS=0
+FAIL=0
+pass() { PASS=$((PASS + 1)); echo "PASS: $*"; }
+fail() { FAIL=$((FAIL + 1)); echo "FAIL: $*"; }
+die() { echo "FATAL: $*" >&2; exit 2; }
+
+SO="$REPO/target/deploy/fund_nft.so"
+[ -f "$SO" ] || die "missing $SO; run: anchor build --ignore-keys --arch v0"
+
+SCRATCH="${E2E_SCRATCH:-${TMPDIR:-/tmp}}"
+mkdir -p "$SCRATCH"
+WORK="$(mktemp -d "$SCRATCH/fund-cli-e2e.XXXXXX")"
+case "$WORK" in
+  "$REPO"/keys*|*/keys/*) die "refusing to use a work dir under keys/: $WORK" ;;
+esac
+echo "work dir: $WORK"
+
+port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+RPC_PORT=""
+for base in 18989 19039 19089; do
+  ok=1
+  for p in $(seq "$base" $((base + 41))); do port_free "$p" || { ok=0; break; }; done
+  if [ "$ok" = 1 ]; then RPC_PORT=$base; break; fi
+done
+[ -n "$RPC_PORT" ] || die "no free 42-port block near 18989"
+WS_PORT=$((RPC_PORT + 1))
+FAUCET_PORT=$((RPC_PORT + 2))
+GOSSIP_PORT=$((RPC_PORT + 3))
+DYN_LO=$((RPC_PORT + 4))
+DYN_HI=$((RPC_PORT + 41))
+URL="http://127.0.0.1:$RPC_PORT"
+echo "validator: $URL (faucet $FAUCET_PORT, dynamic $DYN_LO-$DYN_HI)"
+
+VALIDATOR_PID=""
+cleanup() {
+  if [ -n "$VALIDATOR_PID" ]; then kill "$VALIDATOR_PID" 2>/dev/null; wait "$VALIDATOR_PID" 2>/dev/null; fi
+  if [ "${E2E_KEEP:-0}" = 1 ]; then echo "kept $WORK"; else rm -rf "$WORK"; fi
+}
+trap cleanup EXIT
+
+CFG="$WORK/solana-cli.yml"
+PAYER_KEY="$WORK/payer.json"
+STRANGER_KEY="$WORK/stranger.json"
+solana-keygen new --no-bip39-passphrase --silent --force -o "$PAYER_KEY" >/dev/null || die "keygen payer"
+solana-keygen new --no-bip39-passphrase --silent --force -o "$STRANGER_KEY" >/dev/null || die "keygen stranger"
+PAYER="$(solana-keygen pubkey "$PAYER_KEY")"
+STRANGER="$(solana-keygen pubkey "$STRANGER_KEY")"
+solana -C "$CFG" config set --url "$URL" --keypair "$PAYER_KEY" >/dev/null || die "config"
+echo "payer $PAYER, stranger $STRANGER"
+
+# The quote mint the script controls: the cloned USDC.X with one labeled local
+# change, mint authority := payer (as tests/src/lib.rs does). Its pool side
+# matches the USDC.X/TEST pool, so the fund can pin TEST to that pool.
+USDC_FILE="$WORK/usdc-mint.authority-overridden.json"
+solana account "$USDC" --url "$MAINNET_RPC" --output json -o "$USDC_FILE" >/dev/null || die "dump USDC.X"
+python3 - "$USDC_FILE" "$PAYER" <<'PY' || die "override mint authority"
+import base64, json, sys
+path, authority = sys.argv[1], sys.argv[2]
+ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+n = 0
+for c in authority:
+    n = n * 58 + ALPHABET.index(c)
+key = n.to_bytes(32, "big")
+doc = json.load(open(path))
+data = bytearray(base64.b64decode(doc["account"]["data"][0]))
+data[0:4] = (1).to_bytes(4, "little")
+data[4:36] = key
+doc["account"]["data"][0] = base64.b64encode(bytes(data)).decode()
+json.dump(doc, open(path, "w"))
+PY
+
+FEATURE_ARGS=()
+case "${E2E_FEATURES:-x1}" in
+  x1)
+    mapfile -t INACTIVE < <(solana feature status --display-all --output json --url "$MAINNET_RPC" |
+      jq -r '.features[] | select(.status != "active") | .id')
+    [ "${#INACTIVE[@]}" -gt 0 ] || die "could not read X1 feature status"
+    for f in "${INACTIVE[@]}"; do
+      [ "$f" = "$X1_SYSVAR_SYSCALL_EXCEPTION" ] || FEATURE_ARGS+=(--deactivate-feature "$f")
+    done
+    echo "feature mode x1: deactivating $(( ${#FEATURE_ARGS[@]} / 2 )) X1-inactive features (SIMD-0127 kept active)"
+    ;;
+  agave) echo "feature mode agave: Agave defaults" ;;
+  *) die "E2E_FEATURES must be x1 or agave" ;;
+esac
+
+CLONES=()
+for a in "$POOL" "$AMM" "$OBS" "$VAULT_0" "$VAULT_1" "$TEST_MINT" "$AUTHORITY" "$ATA_PROGRAM"; do CLONES+=(--clone "$a"); done
+solana-test-validator --reset --quiet \
+  --bind-address 127.0.0.1 --rpc-port "$RPC_PORT" --faucet-port "$FAUCET_PORT" \
+  --gossip-port "$GOSSIP_PORT" --dynamic-port-range "$DYN_LO-$DYN_HI" \
+  --ledger "$WORK/ledger" \
+  --bpf-program "$PROGRAM_ID" "$SO" \
+  --url "$MAINNET_RPC" \
+  --clone-upgradeable-program "$TOKENKEG" --clone-upgradeable-program "$TOKEN_2022" \
+  --clone-upgradeable-program "$XDEX" \
+  --account "$USDC" "$USDC_FILE" \
+  "${CLONES[@]}" "${FEATURE_ARGS[@]}" >"$WORK/validator.log" 2>&1 &
+VALIDATOR_PID=$!
+
+for _ in $(seq 1 240); do
+  kill -0 "$VALIDATOR_PID" 2>/dev/null || { tail -40 "$WORK/validator.log"; die "validator exited"; }
+  solana -C "$CFG" cluster-version >/dev/null 2>&1 && break
+  sleep 0.5
+done
+solana -C "$CFG" cluster-version >/dev/null 2>&1 || { tail -40 "$WORK/validator.log"; die "validator not healthy"; }
+echo "validator healthy"
+
+solana -C "$CFG" airdrop 10 "$PAYER" >/dev/null || die "airdrop payer"
+solana -C "$CFG" airdrop 2 "$STRANGER" >/dev/null || die "airdrop stranger"
+spl-token -C "$CFG" create-account "$USDC" --owner "$PAYER" --fee-payer "$PAYER_KEY" >/dev/null || die "payer USDC ATA"
+spl-token -C "$CFG" mint "$USDC" 5 --mint-authority "$PAYER_KEY" --fee-payer "$PAYER_KEY" >/dev/null || die "mint USDC"
+
+cli() { (cd "$KEEPER" && RPC_URL="$URL" npx tsx src/cli.ts "$@"); }
+OUT="$WORK/out.txt"
+
+# Run "$@" with KEYPAIR=$1; expect success; tee output to $OUT.
+run_ok() {
+  local key="$1" name="$2"; shift 2
+  if KEYPAIR="$key" cli "$@" >"$OUT" 2>&1; then pass "$name"; else fail "$name (exit $?)"; fi
+  sed 's/^/    /' "$OUT"
+}
+run_fail() {
+  local key="$1" name="$2" pattern="$3"; shift 3
+  if KEYPAIR="$key" cli "$@" >"$OUT" 2>&1; then
+    fail "$name: succeeded but must fail"
+  elif grep -Eq "$pattern" "$OUT"; then
+    pass "$name (failed with /$pattern/)"
+  else
+    fail "$name: failed without /$pattern/"
+  fi
+  sed 's/^/    /' "$OUT"
+}
+expect_out() { if grep -Eq "$2" "$OUT"; then pass "$1"; else fail "$1: no /$2/ in output"; fi; }
+
+CREATE=(create-fund --quote "$USDC"
+  --target "$USDC:default:2000" --target "$TEST_MINT:$POOL:8000"
+  --per-run 100000 --interval 3600 --window 3600 --max-dev-bps 300)
+
+echo; echo "== guards"
+run_fail "$PAYER_KEY" "send without --cluster is refused" "requires --cluster" "${CREATE[@]}" --send
+run_fail "$PAYER_KEY" "send with --cluster testnet on localnet is refused" "is localnet" "${CREATE[@]}" --send --cluster testnet
+run_fail "" "send without KEYPAIR is refused" "needs KEYPAIR" "${CREATE[@]}" --send --cluster localnet
+run_fail "$PAYER_KEY" "max-dev-bps 501 is refused client-side" "cannot exceed 500" \
+  create-fund --quote "$USDC" --target "$USDC:default:10000" --per-run 1 --interval 60 --window 900 --max-dev-bps 501
+run_fail "$PAYER_KEY" "pool not owned by --xdex is refused" "not XDEX" "${CREATE[@]}" --xdex "$TOKEN_2022"
+
+echo; echo "== create-fund (simulate-only, then send)"
+run_ok "" "create-fund simulate with --payer" "${CREATE[@]}" --payer "$PAYER"
+expect_out "simulation printed compute units" "simulation: ok, [0-9]+ compute units"
+expect_out "simulate-only sent nothing" "nothing was signed or sent"
+run_ok "$PAYER_KEY" "create-fund --send" "${CREATE[@]}" --send --cluster localnet
+FUND="$(sed -n 's/^fund PDA: *//p' "$OUT")"
+NFT="$(sed -n 's/^NFT mint (generated in memory): *//p' "$OUT")"
+[ -n "$FUND" ] && pass "fund PDA printed: $FUND" || fail "no fund PDA in output"
+expect_out "create-fund confirmed both transactions" "tx 2/2 .*"
+[ "$(grep -c 'sent and confirmed' "$OUT")" = 2 ] && pass "two confirmed signatures" || fail "expected two confirmations"
+
+echo; echo "== deposit"
+run_ok "" "deposit simulate-only" deposit --fund "$FUND" --amount 1000000 --payer "$PAYER"
+run_ok "$PAYER_KEY" "deposit --send 1 USDC.X" deposit --fund "$FUND" --amount 1000000 --send --cluster localnet
+expect_out "deposit summary in UI units" "amount +1 of $USDC \\(raw 1000000\\)"
+
+echo; echo "== show"
+run_ok "" "show" show --fund "$FUND"
+expect_out "cash budget 200000" "budget 0.2 quote \\(raw 200000\\)"
+expect_out "TEST budget 800000" "budget 0.8 quote \\(raw 800000\\)"
+expect_out "TEST target due now" "next due due now"
+expect_out "quote vault holds 1 USDC.X" "$USDC [1-9A-HJ-NP-Za-km-z]+ 1 \\(raw 1000000\\)"
+expect_out "TEST vault exists and is empty" "$TEST_MINT [1-9A-HJ-NP-Za-km-z]+ 0 \\(raw 0\\)"
+expect_out "NFT holder is the payer" "NFT holder +$PAYER"
+
+echo; echo "== keeper dry-run sees the due target (execute_dca is not run here)"
+if (cd "$KEEPER" && env -u KEYPAIR RPC_URL="$URL" npx tsx src/index.ts --dry-run) >"$OUT" 2>&1; then
+  pass "keeper --dry-run"
+else
+  fail "keeper --dry-run (exit $?)"
+fi
+sed 's/^/    /' "$OUT"
+expect_out "keeper finds 1 due target" "1 fund accounts, 1 due targets"
+expect_out "keeper targets the TEST vault" "\"targetIndex\": 1"
+
+echo; echo "== withdraw"
+run_ok "$PAYER_KEY" "withdraw 0.1 USDC.X --send" withdraw --fund "$FUND" --mint "$USDC" --amount 100000 --send --cluster localnet
+run_ok "" "show after withdraw" show --fund "$FUND"
+expect_out "cash budget 180000" "raw 180000\\)"
+expect_out "TEST budget 720000" "raw 720000\\)"
+expect_out "quote vault 0.9" "$USDC [1-9A-HJ-NP-Za-km-z]+ 0.9 \\(raw 900000\\)"
+BAL="$(spl-token -C "$CFG" balance "$USDC" --owner "$PAYER")"
+[ "$BAL" = "4.1" ] && pass "payer USDC.X balance 4.1" || fail "payer USDC.X balance $BAL, expected 4.1"
+
+run_fail "$STRANGER_KEY" "non-holder withdraw is rejected by the program" "BadNft" \
+  withdraw --fund "$FUND" --mint "$USDC" --amount 1 --send --cluster localnet
+run_ok "" "show after rejected withdraw" show --fund "$FUND"
+expect_out "quote vault unchanged at 0.9" "$USDC [1-9A-HJ-NP-Za-km-z]+ 0.9 \\(raw 900000\\)"
+
+run_ok "$PAYER_KEY" "withdraw all USDC.X --send" withdraw --fund "$FUND" --mint "$USDC" --amount all --send --cluster localnet
+run_ok "" "show after withdraw all" show --fund "$FUND"
+expect_out "budget total 0" "budget total +0 quote \\(raw 0\\)"
+expect_out "quote vault empty" "$USDC [1-9A-HJ-NP-Za-km-z]+ 0 \\(raw 0\\)"
+
+echo
+echo "e2e-local: $PASS passed, $FAIL failed (feature mode ${E2E_FEATURES:-x1}, NFT $NFT)"
+[ "$FAIL" = 0 ]
