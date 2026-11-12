@@ -47,6 +47,8 @@ A deploy that fails after the buffer is written leaves the buffer funded with 2.
 3. 0.75 XNT is System-transferred to the fund PDA. The old program refuses `withdraw_native` (Anchor 101, `InstructionFallbackNotFound`).
 4. The upgrade runs through `scripts/upgrade-withdraw-native.sh` in its local mode, the same `check` and `apply` the owner runs:
    - `check` with the wrong key fails, and `apply` without `--i-understand-mainnet` is refused.
+   - A fourth instance holds unknown code of the old size: the mainnet build with one byte changed. `check` refuses it at 403,520 bytes, and refuses it again at 412,528 after a manual extend. `apply` on it sends nothing.
+   - A failing `program dump` is refused, and so is a program id that isn't a program.
    - On a third instance, `apply` from 403,520 bytes extends by 9,008 and deploys, and a second `apply` is a no-op.
    - On the real id, `check` deletes and rebuilds the artifact, sends nothing, and reports "extend by 9008".
    - Then a manual `program extend` simulates an earlier run that stopped after the extend. The old code still executes in that state: a deposit simulates, and `withdraw_native` is still unknown.
@@ -69,12 +71,12 @@ cd ~/X1_PROJECTS/X1_FundNFT     # the reviewed commit, after target/deploy/fund_
 REHEARSE_SCRATCH=/tmp/fund-rehearsal \
   EXPECT_NEW_SHA=a2ae4c9cedeb413a274dd93c7afb095ad88a6082d40f4f0aad4a53f7cab13388 \
   bash scripts/rehearse-upgrade-local.sh
-# last line: upgrade rehearsal: 89 passed, 0 failed (...)
+# last line: upgrade rehearsal: 99 passed, 0 failed (...)
 ```
 
 ## Steps
 
-Run the upgrade with `scripts/upgrade-withdraw-native.sh`. It fails closed: every check is an assertion, and `apply` reruns all of them before it spends anything. It runs in its own process, so a failure never exits your shell. It reads the keypair only by path, through `solana-keygen pubkey` and as the signer. It uses its own temporary solana config, so `~/.config/solana` is not consulted.
+Run the upgrade with `scripts/upgrade-withdraw-native.sh`. It fails closed: every check is an assertion, and `apply` reruns all of them before it spends anything. It runs in its own process, so a failure never exits your shell. It reads the keypair only by path, through `solana-keygen pubkey` and as the signer. Every `solana` and `solana-keygen` call it makes passes `-C` with its own temporary config, so `~/.config/solana` is not consulted.
 
 ```sh
 cd ~/X1_PROJECTS/X1_FundNFT      # a checkout of the reviewed commit
@@ -94,10 +96,11 @@ bash scripts/upgrade-withdraw-native.sh check
 - It deletes `target/deploy/fund_nft.so` and builds again. The fresh artifact must be 412,528 bytes with sha256 `a2ae4c9c…`, ELF e_flags 0, and no `sol_get_sysvar` import.
 - The RPC genesis hash is X1 mainnet's, `4SvBP3…`.
 - `solana-keygen pubkey "$DEPLOYER"` and the program's on-chain upgrade authority are both `HffqrD7V…`.
-- ProgramData has one of two data lengths. At 403,520 it plans "extend by 9008, then deploy". At 412,528 it reports one of two states:
-  - "already extended, not yet deployed", when an earlier run stopped after the extend
-  - "already upgraded: nothing to do"
-  Any other length is refused.
+- The on-chain code is authenticated before anything is planned. `check` runs `solana program dump`, and a failed dump is refused. The dump is the whole ProgramData payload: after an extend it is the full 412,528 bytes, including the zero padding, as observed in the rehearsal. Only three cases are accepted:
+  - data length 403,520 and the dump's sha256 is the current build `d7606fcf…`: it plans "extend by 9008, then deploy"
+  - data length 412,528 and the first 403,520 bytes hash to `d7606fcf…` with the remaining 9,008 bytes all zero: "already extended, not yet deployed", i.e. an earlier run stopped after the extend; deploy only
+  - data length 412,528 and the dump's sha256 is `a2ae4c9c…`: "already upgraded: nothing to do"
+  Anything else is refused: another length, or unknown code at either length.
 - Leftover buffers owned by the authority are listed with their close commands. This is a warning, not a failure.
 - The `DEPLOYER` balance covers: extend rent (if needed) + temporary buffer rent + a 0.05 XNT fee margin. All rent values come from `getMinimumBalanceForRentExemption`. From 403,520 bytes this is 2,985,038,960 lamports, about 2.99 XNT.
 
@@ -113,7 +116,7 @@ bash scripts/upgrade-withdraw-native.sh apply --i-understand-mainnet
 
 If `apply` stops part-way:
 - **It stopped after the extend.** Rerun `apply`. It sees 412,528 bytes and deploys without extending again.
-- **The deploy failed.** The old program stays live, and `apply` prints the recovery commands. The buffer keeps its 2.8723 XNT. Either resume it with the 12-word phrase the CLI printed (`solana-keygen recover`, then `solana program deploy --buffer …`), or close it with `solana program close <BUFFER> --keypair "$DEPLOYER" --url https://rpc.mainnet.x1.xyz` and rerun `apply`.
+- **The deploy command exited non-zero.** That does **not** prove the old program is still live: the upgrade transaction can land after the client has given up waiting. **Rerun `check` first.** It authenticates the on-chain code and tells you which state you are in: old, old plus padding, or already new. `apply` also prints the recovery commands, each with an empty `-C` config. A leftover buffer keeps its 2.8723 XNT. Either resume it with the 12-word phrase the CLI printed (`solana-keygen -C "$C" recover`, then `solana -C "$C" program deploy --buffer …`), or close it with `solana -C "$C" program close <BUFFER> --keypair "$DEPLOYER" --url https://rpc.mainnet.x1.xyz` and rerun `apply`.
 - **Rerunning after a finished upgrade** prints "already upgraded; nothing sent".
 
 ## Appendix: the manual commands `apply` runs

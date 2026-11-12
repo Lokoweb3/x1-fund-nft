@@ -21,8 +21,11 @@
 #   finished upgrade changes nothing. If the deploy fails it prints the
 #   buffer-recovery commands.
 #
-# Every solana call uses a fresh -C config in a temp dir (url = the target,
-# keypair = DEPLOYER), so ~/.config/solana is never consulted. The keypair
+# Every solana and solana-keygen call passes -C with a fresh config in a temp
+# dir (url = the target, keypair = DEPLOYER), so ~/.config/solana is never
+# consulted. check authenticates the on-chain code by `program dump` before
+# planning: old build, old build + zero padding, or new build; anything else
+# (or a failed dump) is refused. The keypair
 # file is only ever passed to solana by path; its contents are never read or
 # printed here.
 #
@@ -61,6 +64,8 @@ for t in jq python3 sha256sum git; do command -v "$t" >/dev/null || die "$t is r
 X1_MAINNET_GENESIS="4SvBP3omtvcCVWdxq1zBY5cDp4wndjsThb6nEMn6iMdN"
 X1_TESTNET_GENESIS="C7ucgdDEhxLTpXHhWSZxavSVmaNTUJWwT5iTdeaviDho"
 OLD_LEN=403520
+# The build live on X1 mainnet today (acb6953).
+OLD_SHA="d7606fcf12fb6489a95b3c7c2601725a53a37b6491b2521c0a9287db48cd2c47"
 NEW_LEN=412528
 NEW_SHA="a2ae4c9cedeb413a274dd93c7afb095ad88a6082d40f4f0aad4a53f7cab13388"
 # Lamports kept above the computed rent for transaction fees (rehearsal: the
@@ -99,6 +104,27 @@ solana() { "$SOLANA_BIN_DIR/solana" -C "$CFG" --url "$URL" "$@"; }
 sha() { sha256sum "$1" | awk '{print $1}'; }
 rent_of() { solana rent "$1" --lamports | awk '/Rent-exempt minimum/ {print $3}'; }
 show_json() { solana program show "$PROGRAM_ID" --output json; }
+keygen_pubkey() { "$SOLANA_BIN_DIR/solana-keygen" -C "$CFG" pubkey "$1"; }
+# Classify a `program dump` of ProgramData: new (the reviewed build), old
+# (exactly the current mainnet build), old+zero (the current build followed
+# by zero bytes up to exactly NEW_LEN: extended, not yet deployed), or
+# unknown. The caller also requires dump length == ProgramData data length.
+classify_dump() {
+  python3 -I - "$1" "$OLD_LEN" "$OLD_SHA" "$NEW_SHA" "$NEW_LEN" <<'PY'
+import hashlib, sys
+path, old_len, old_sha, new_sha, new_len = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5])
+d = open(path, "rb").read()
+h = lambda b: hashlib.sha256(b).hexdigest()
+if h(d) == new_sha:
+    print("new")
+elif len(d) == old_len and h(d) == old_sha:
+    print("old")
+elif len(d) == new_len and h(d[:old_len]) == old_sha and not any(d[old_len:]):
+    print("old+zero")
+else:
+    print("unknown")
+PY
+}
 
 echo "target $TARGET: $URL, program $PROGRAM_ID, expected authority $AUTHORITY"
 
@@ -108,7 +134,7 @@ run_checks() {
   FAIL=0
   echo; echo "== toolchain and build"
   local v
-  v="$("$SOLANA_BIN_DIR/solana" --version)"
+  v="$("$SOLANA_BIN_DIR/solana" -C "$CFG" --version)" || die "solana --version failed"
   case "$v" in *" 4.1.2 "*|*" 4.1.2") pass "solana $v" ;; *) fail "solana is not 4.1.2: $v" ;; esac
   if [ "${UPGRADE_SKIP_BUILD:-0}" = 1 ]; then
     echo "UPGRADE_SKIP_BUILD=1 (local rehearsal only): using the existing $SO"
@@ -116,17 +142,20 @@ run_checks() {
     [ -x "$ANCHOR_BIN" ] && v="$("$ANCHOR_BIN" --version)" || v="missing $ANCHOR_BIN"
     case "$v" in *1.2.2*) pass "anchor $v" ;; *) fail "anchor is not 1.2.2: $v" ;; esac
     local head
-    head="$(git -C "$REPO" rev-parse HEAD)"
+    head="$(git -C "$REPO" rev-parse HEAD)" || die "git rev-parse HEAD failed"
     if [ -n "${EXPECT_COMMIT:-}" ]; then
       [ "$head" = "$(git -C "$REPO" rev-parse --verify "${EXPECT_COMMIT}^{commit}" 2>/dev/null || echo none)" ] &&
         pass "HEAD is the reviewed commit $head" || fail "HEAD $head is not EXPECT_COMMIT $EXPECT_COMMIT"
     else
       echo "HEAD $head (EXPECT_COMMIT not set; local rehearsal)"
     fi
-    if [ -z "$(git -C "$REPO" status --porcelain -- programs Cargo.toml Cargo.lock Anchor.toml rust-toolchain.toml)" ]; then
+    local dirty
+    dirty="$(git -C "$REPO" status --porcelain -- programs Cargo.toml Cargo.lock Anchor.toml rust-toolchain.toml)" ||
+      die "git status failed"
+    if [ -z "$dirty" ]; then
       pass "build inputs (programs/, Cargo.*, Anchor.toml, rust-toolchain.toml) have no local changes"
     else
-      fail "build inputs have local changes:"; git -C "$REPO" status --porcelain -- programs Cargo.toml Cargo.lock Anchor.toml rust-toolchain.toml
+      fail "build inputs have local changes:"; echo "$dirty"
     fi
     rm -f -- "$SO"
     echo "building (anchor build --ignore-keys --arch v0) ..."
@@ -150,7 +179,7 @@ PY
 
   echo; echo "== chain"
   local genesis
-  genesis="$(solana genesis-hash)"
+  genesis="$(solana genesis-hash)" || die "genesis-hash failed for $URL"
   if [ "$TARGET" = mainnet ]; then
     [ "$genesis" = "$X1_MAINNET_GENESIS" ] && pass "RPC is X1 mainnet ($genesis)" || die "RPC genesis $genesis is not X1 mainnet; refusing"
   else
@@ -160,34 +189,49 @@ PY
     pass "local genesis $genesis (not X1 mainnet or testnet)"
   fi
   local deployer_pub
-  deployer_pub="$("$SOLANA_BIN_DIR/solana-keygen" pubkey "$DEPLOYER")"
+  deployer_pub="$(keygen_pubkey "$DEPLOYER")" || die "solana-keygen pubkey failed for DEPLOYER"
   [ "$deployer_pub" = "$AUTHORITY" ] && pass "DEPLOYER pubkey is $AUTHORITY" || fail "DEPLOYER pubkey $deployer_pub is not $AUTHORITY"
   local show onchain_auth
   show="$(show_json)" || die "program show $PROGRAM_ID failed"
-  onchain_auth="$(jq -r '.authority' <<<"$show")"
-  DATA_LEN="$(jq -r '.dataLen' <<<"$show")"
+  onchain_auth="$(jq -r '.authority' <<<"$show")" || die "cannot parse program show"
+  DATA_LEN="$(jq -r '.dataLen' <<<"$show")" || die "cannot parse program show"
   [ "$onchain_auth" = "$AUTHORITY" ] && pass "on-chain upgrade authority is $AUTHORITY" || fail "on-chain upgrade authority is $onchain_auth"
   echo "ProgramData $(jq -r '.programdataAddress' <<<"$show"), data length $DATA_LEN, last deployed in slot $(jq -r '.lastDeploySlot' <<<"$show")"
   EXTEND_BY=0
-  case "$DATA_LEN" in
-    "$OLD_LEN") STATE=extend; EXTEND_BY=$((NEW_LEN - DATA_LEN)); pass "data length $DATA_LEN: extend by $EXTEND_BY bytes, then deploy" ;;
-    "$NEW_LEN")
-      solana program dump "$PROGRAM_ID" "$TMP/onchain.so" >/dev/null
-      if [ "$(sha "$TMP/onchain.so")" = "$NEW_SHA" ]; then
-        STATE=upgraded; pass "data length $DATA_LEN and the on-chain program is already $NEW_SHA: nothing to do"
-      else
-        STATE=extended; pass "data length $DATA_LEN (already extended, not yet deployed): no extend, deploy only"
-      fi
-      ;;
-    *) STATE=refuse; fail "data length $DATA_LEN is neither $OLD_LEN (current build) nor $NEW_LEN; refusing" ;;
+  # Authenticate the code on chain before planning anything. `program dump`
+  # writes the whole ProgramData payload (data length bytes, including the
+  # zero padding an extend adds; see docs/UPGRADE_WITHDRAW_NATIVE.md).
+  if ! solana program dump "$PROGRAM_ID" "$TMP/onchain.so" >"$TMP/dump.log" 2>&1; then
+    cat "$TMP/dump.log"
+    die "program dump $PROGRAM_ID failed: the on-chain code cannot be authenticated; refusing"
+  fi
+  local dump_class dump_len
+  dump_class="$(classify_dump "$TMP/onchain.so")" || die "could not classify the program dump"
+  dump_len="$(stat -c %s "$TMP/onchain.so")" || die "stat dump"
+  echo "on-chain dump: $dump_len bytes, sha256 $(sha "$TMP/onchain.so") ($dump_class)"
+  # The dump must be the whole ProgramData payload (observed: full data length).
+  [ "$dump_len" = "$DATA_LEN" ] || dump_class="unknown"
+  case "$DATA_LEN:$dump_class" in
+    "$OLD_LEN:old")
+      STATE=extend; EXTEND_BY=$((NEW_LEN - DATA_LEN))
+      pass "on-chain code is the current build $OLD_SHA; data length $DATA_LEN: extend by $EXTEND_BY bytes, then deploy" ;;
+    "$NEW_LEN:new")
+      STATE=upgraded; pass "data length $DATA_LEN and the on-chain program is already $NEW_SHA: nothing to do" ;;
+    "$NEW_LEN:old+zero")
+      STATE=extended
+      pass "data length $DATA_LEN, current build $OLD_SHA plus zero padding (already extended, not yet deployed): no extend, deploy only" ;;
+    *)
+      STATE=refuse
+      fail "on-chain code ($dump_class, $dump_len bytes) at data length $DATA_LEN is neither the current build $OLD_SHA (optionally zero-padded to $NEW_LEN) nor $NEW_SHA; refusing" ;;
   esac
 
   local buffers
-  buffers="$(solana program show --buffers --buffer-authority "$AUTHORITY" --output json | jq -r '.buffers[]? | "\(.address) \(.lamports)"')"
+  buffers="$(solana program show --buffers --buffer-authority "$AUTHORITY" --output json | jq -r '.buffers[]? | "\(.address) \(.lamports)"')" ||
+    die "listing buffers failed"
   if [ -n "$buffers" ]; then
     echo "WARNING: buffers owned by $AUTHORITY exist (an earlier deploy stopped part-way). Their XNT is recoverable:"
     while read -r addr lamports; do
-      echo "  $addr ($lamports lamports): solana program close $addr --keypair \"\$DEPLOYER\" --url $URL"
+      echo "  $addr ($lamports lamports): C=\$(mktemp) && solana -C \"\$C\" program close $addr --keypair \"\$DEPLOYER\" --url $URL"
     done <<<"$buffers"
   else
     pass "no leftover buffers owned by $AUTHORITY"
@@ -195,22 +239,27 @@ PY
 
   NEED=0
   if [ "$STATE" = extend ] || [ "$STATE" = extended ]; then
-    local extend_rent=0 buffer_rent balance
+    local extend_rent=0 buffer_rent balance rent_new rent_old
     if [ "$STATE" = extend ]; then
-      extend_rent=$(( $(rent_of $((NEW_LEN + 45))) - $(rent_of $((OLD_LEN + 45))) ))
+      rent_new="$(rent_of $((NEW_LEN + 45)))" || die "rent query failed"
+      rent_old="$(rent_of $((OLD_LEN + 45)))" || die "rent query failed"
+      extend_rent=$((rent_new - rent_old))
     fi
-    buffer_rent="$(rent_of $((NEW_LEN + 37)))"
+    buffer_rent="$(rent_of $((NEW_LEN + 37)))" || die "rent query failed"
     NEED=$((extend_rent + buffer_rent + FEE_MARGIN))
-    balance="$(solana balance "$AUTHORITY" --lamports | awk '{print $1}')"
+    balance="$(solana balance "$AUTHORITY" --lamports | awk '{print $1}')" || die "balance query failed"
     echo "needed: extend rent $extend_rent + temporary buffer $buffer_rent (refunded) + fee margin $FEE_MARGIN = $NEED lamports"
     [ "$balance" -ge "$NEED" ] && pass "DEPLOYER balance $balance >= $NEED lamports" ||
       fail "DEPLOYER balance $balance < $NEED lamports"
   fi
   echo; echo "check: $PASS passed, $FAIL failed (state: $STATE)"
-  [ "$FAIL" = 0 ]
 }
 
-if ! run_checks; then
+# Called as a plain command so errexit applies inside: every command in
+# run_checks either succeeds, is an explicit test, or dies.
+STATE=refuse
+run_checks
+if [ "$FAIL" != 0 ] || [ "$STATE" = refuse ]; then
   echo "check failed; nothing was sent"
   exit 1
 fi
@@ -224,24 +273,29 @@ if [ "$STATE" = upgraded ]; then
 fi
 if [ "$STATE" = extend ]; then
   echo "extending ProgramData by $EXTEND_BY bytes"
-  solana program extend "$PROGRAM_ID" "$EXTEND_BY" --keypair "$DEPLOYER"
-  DATA_LEN="$(show_json | jq -r '.dataLen')"
+  solana program extend "$PROGRAM_ID" "$EXTEND_BY" --keypair "$DEPLOYER" || die "extend failed; rerun check"
+  DATA_LEN="$(show_json | jq -r '.dataLen')" || die "program show failed after extend; rerun check"
   [ "$DATA_LEN" = "$NEW_LEN" ] || die "data length after extend is $DATA_LEN, not $NEW_LEN; not deploying"
   echo "PASS: data length is now $DATA_LEN"
 fi
 echo "deploying $SO"
 if ! solana program deploy "$SO" --program-id "$PROGRAM_ID" \
     --keypair "$DEPLOYER" --upgrade-authority "$DEPLOYER" --with-compute-unit-price 1000; then
-  echo "FAIL: deploy did not complete. The old program is still live. Any buffer keeps its XNT:"
-  echo "  list:    solana program show --buffers --buffer-authority $AUTHORITY --url $URL"
-  echo "  close:   solana program close <BUFFER> --keypair \"\$DEPLOYER\" --url $URL"
-  echo "  or resume with the 12-word phrase printed above: solana-keygen recover -o /abs/buffer.json, then"
-  echo "           solana program deploy $SO --buffer /abs/buffer.json --program-id $PROGRAM_ID \\"
-  echo "             --keypair \"\$DEPLOYER\" --upgrade-authority \"\$DEPLOYER\" --url $URL --with-compute-unit-price 1000"
-  echo "  then rerun this script: it sees the extended length and does not extend again."
+  echo "FAIL: the deploy command exited non-zero. That does NOT prove the old program is still live:"
+  echo "  the upgrade transaction may have landed after the client gave up. First rerun"
+  echo "    bash scripts/upgrade-withdraw-native.sh check"
+  echo "  which authenticates the on-chain code (old, old + zero padding, or new). Then:"
+  echo "  any buffer keeps its XNT. With an empty config (so ~/.config/solana is not used):"
+  echo "    C=\$(mktemp)"
+  echo "    list:   solana -C \"\$C\" program show --buffers --buffer-authority $AUTHORITY --url $URL"
+  echo "    close:  solana -C \"\$C\" program close <BUFFER> --keypair \"\$DEPLOYER\" --url $URL"
+  echo "    resume: solana-keygen -C \"\$C\" recover -o /abs/buffer.json   (the 12-word phrase printed above), then"
+  echo "            solana -C \"\$C\" program deploy $SO --buffer /abs/buffer.json --program-id $PROGRAM_ID \\"
+  echo "              --keypair \"\$DEPLOYER\" --upgrade-authority \"\$DEPLOYER\" --url $URL --with-compute-unit-price 1000"
+  echo "  or simply rerun apply: it sees the extended length and does not extend again."
   exit 1
 fi
-solana program dump "$PROGRAM_ID" "$TMP/onchain.so" >/dev/null
+solana program dump "$PROGRAM_ID" "$TMP/onchain.so" >/dev/null || die "program dump after deploy failed; rerun check"
 [ "$(sha "$TMP/onchain.so")" = "$NEW_SHA" ] || die "on-chain program hash $(sha "$TMP/onchain.so") != $NEW_SHA after deploy"
 echo "PASS: on-chain program hash is $NEW_SHA"
 [ "$(show_json | jq -r '.authority')" = "$AUTHORITY" ] || die "upgrade authority changed after deploy"
