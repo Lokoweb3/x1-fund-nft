@@ -128,9 +128,11 @@ test("card with a picture: <img> with no referrer, name, tokens inside, total", 
   assert.match(html, /src="https:\/\/www.x1inscriptions.io\/api\/ins\/66\?card=1&amp;v=1"/);
   assert.doesNotMatch(html, /<(iframe|object|embed|video)/);
   assert.match(html, /X1-FUND/);
-  assert.match(html, /≈ 10.4 WXNT/);
-  assert.match(html, /Test/);
-  assert.match(html, /≈ <!-- -->0.6/);
+  assert.match(html, /≈ 10.40 WXNT/);
+  assert.match(html, /data-testid="nft-allocation"/);
+  assert.match(html, /WXNT<!-- --> <strong>94%<\/strong>/);
+  assert.match(html, /Test<!-- --> <strong>6%<\/strong>/);
+  assert.doesNotMatch(html, /0.6000|9.80/); // no raw amounts or per-token values in the card
   assert.match(html, /Open animation \(external link\)/);
 });
 

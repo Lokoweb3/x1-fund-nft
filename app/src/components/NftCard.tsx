@@ -5,9 +5,10 @@ import { readFundMetadata } from "@core/rpc.js";
 import type { StoredMetadata } from "@core/metadata.js";
 import type { NetworkInfo } from "../lib/network";
 import type { TokenLabel } from "../lib/tokens";
-import { formatApprox } from "../lib/value";
+import { formatShare, formatValue } from "../lib/format";
+import { sharePercent, sortByValue, type Valuation } from "../lib/value";
 import { resolvePicture, type PictureState } from "../lib/nft_picture";
-import type { ValuationState } from "./Holdings";
+import { symOf, type ValuationState } from "./Holdings";
 
 /**
  * The picture for a metadata uri. Auto-fetches only X1 Inscriptions hosts;
@@ -102,7 +103,29 @@ export function NftPicture({
   );
 }
 
-const symOf = (labels: Record<string, TokenLabel>, mint: string) => labels[mint]?.symbol ?? `${mint.slice(0, 4)}…`;
+/** One stacked bar and a legend of shares by value; no raw amounts (those are in the Holdings table). */
+export function Allocation({ valuation, labels }: { valuation: Valuation; labels: Record<string, TokenLabel> }) {
+  const rows = sortByValue(valuation.rows).filter((r) => r.value !== undefined && r.value > 0n);
+  const parts = rows.map((r, i) => ({ r, i, share: sharePercent(r.value!, valuation.total) }));
+  return (
+    <div className="allocation" data-testid="nft-allocation">
+      <div className="alloc-bar" aria-hidden="true">
+        {parts.map(({ r, i, share }) => (
+          <span key={r.mint.address.toBase58()} className={`seg seg-${i % 6}`} style={{ width: `${Math.max(share, 1.5)}%` }} />
+        ))}
+      </div>
+      <ul className="alloc-legend">
+        {parts.map(({ r, i, share }) => (
+          <li key={r.mint.address.toBase58()}>
+            <span className={`swatch seg-${i % 6}`} aria-hidden="true" />
+            {symOf(labels, r.mint.address.toBase58())} <strong>{formatShare(share)}</strong>
+          </li>
+        ))}
+        {!valuation.complete && <li className="muted">+ value unknown</li>}
+      </ul>
+    </div>
+  );
+}
 
 /** Presentational NFT card: picture, name, and what the fund holds "inside" it. */
 export function NftCardView({
@@ -133,7 +156,7 @@ export function NftCardView({
           <span className="nft-total-value">
             {holdings.status === "loading" && "…"}
             {holdings.status === "error" && "value unknown"}
-            {v && `≈ ${formatApprox(v.total, qd)} ${q}${v.complete ? "" : " + unknown"}`}
+            {v && `≈ ${formatValue(v.total, qd)} ${q}${v.complete ? "" : " + unknown"}`}
           </span>
         </div>
       </div>
@@ -142,20 +165,7 @@ export function NftCardView({
           <strong data-testid="nft-name">{name}</strong>
           {stored?.symbol && <span className="tag">{stored.symbol}</span>}
         </div>
-        <ul className="nft-tokens" data-testid="nft-tokens">
-          {view.vaults.map((x) => {
-            const mint = x.mint.address.toBase58();
-            const row = v?.rows.find((r) => r.mint.address.equals(x.mint.address));
-            return (
-              <li key={mint} className="chip-token nft-token" title={mint}>
-                <span className="dot" aria-hidden="true" />
-                <span className="nft-token-sym">{symOf(labels, mint)}</span>
-                <span className="mono">{x.balance === undefined ? "missing" : formatApprox(x.balance, x.mint.decimals)}</span>
-                {row?.value !== undefined && !row.isQuote && <span className="muted">≈ {formatApprox(row.value, qd)}</span>}
-              </li>
-            );
-          })}
-        </ul>
+        {v && <Allocation valuation={v} labels={labels} />}
         {picture.status === "ok" && picture.animationUrl && (
           <a className="small" href={picture.animationUrl} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">
             Open animation (external link)

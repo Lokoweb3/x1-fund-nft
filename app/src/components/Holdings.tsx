@@ -3,7 +3,8 @@ import type { Connection } from "@solana/web3.js";
 import type { FundView } from "@core/rpc.js";
 import type { TokenLabel } from "../lib/tokens";
 import { bpsToPercent } from "../lib/wizard";
-import { formatApprox, loadValuation, sharePercent, type Valuation } from "../lib/value";
+import { exactUi, formatAmount, formatShare, formatValue } from "../lib/format";
+import { loadValuation, sharePercent, sortByValue, type HoldingRow, type Valuation } from "../lib/value";
 
 export type ValuationState = { status: "loading" } | { status: "error" } | { status: "ok"; valuation: Valuation };
 
@@ -26,9 +27,15 @@ export function useValuation(connection: Connection | undefined, view: FundView 
   return state.value;
 }
 
-const symOf = (labels: Record<string, TokenLabel>, mint: string) => labels[mint]?.symbol ?? `${mint.slice(0, 4)}…`;
+export const symOf = (labels: Record<string, TokenLabel>, mint: string) => labels[mint]?.symbol ?? `${mint.slice(0, 4)}…`;
 
-/** The fund's worth at the pools' current prices, per token. */
+/** Token name for a row: the quote token reads "<symbol> (unspent)". */
+export function rowName(r: HoldingRow, labels: Record<string, TokenLabel>): string {
+  const s = symOf(labels, r.mint.address.toBase58());
+  return r.isQuote ? `${s} (unspent)` : s;
+}
+
+/** The fund's worth at the pools' current prices, per token, as one table. */
 export function HoldingsCard({ state, view, labels }: { state: ValuationState; view: FundView; labels: Record<string, TokenLabel> }) {
   const q = symOf(labels, view.account.quoteMint.toBase58());
   const qd = view.quote.decimals;
@@ -36,73 +43,87 @@ export function HoldingsCard({ state, view, labels }: { state: ValuationState; v
   const fees = v?.rows.filter((r) => r.withdrawFee > 0n) ?? [];
   return (
     <div className="holdings" data-testid="holdings">
-      <div className="stats">
-        <div className="stat stat-main">
-          <span className="stat-label">Estimated value</span>
-          <span className="stat-value" data-testid="holdings-total">
-            {state.status === "loading" && "…"}
-            {state.status === "error" && "unknown"}
-            {v && (
-              <>
-                ≈ {formatApprox(v.total, qd)} <span className="stat-unit">{q}</span>
-                {!v.complete && <span className="stat-unit"> + unknown</span>}
-              </>
-            )}
-          </span>
-        </div>
-        <div className="stat">
-          <span className="stat-label">{q} left to spend</span>
-          <span className="stat-value small-value">
-            {view.vaults[0]?.balance === undefined ? "unknown" : formatApprox(view.vaults[0].balance, qd)}
-          </span>
-        </div>
-        <div className="stat">
-          <span className="stat-label">Tokens held</span>
-          <span className="stat-value small-value">{view.vaults.filter((x) => (x.balance ?? 0n) > 0n).length}</span>
-        </div>
+      <div className="holdings-head">
+        <span className="stat-label">Estimated value</span>
+        <span className="stat-value" data-testid="holdings-total" title={v ? `${exactUi(v.total, qd)} ${q}` : undefined}>
+          {state.status === "loading" && "…"}
+          {state.status === "error" && "unknown"}
+          {v && (
+            <>
+              ≈ {formatValue(v.total, qd)} <span className="stat-unit">{q}</span>
+              {!v.complete && <span className="stat-unit"> + unknown</span>}
+            </>
+          )}
+        </span>
       </div>
       {v && (
-        <ul className="holding-list">
-          {v.rows.map((r) => {
-            const mint = r.mint.address.toBase58();
-            const share = r.value !== undefined ? sharePercent(r.value, v.total) : 0;
-            return (
-              <li key={mint} className="holding" data-testid={`holding-${mint}`}>
-                <span className="chip-token" title={mint}>
-                  <span className="dot" aria-hidden="true" />
-                  {symOf(labels, mint)}
-                  {r.isQuote && <span className="tag">quote</span>}
-                </span>
-                <span className="holding-balance mono">{r.balance === undefined ? "missing" : formatApprox(r.balance, r.mint.decimals)}</span>
-                <span className="holding-value">
-                  {r.value === undefined ? <span className="muted">value unknown</span> : `≈ ${formatApprox(r.value, qd)} ${q}`}
-                </span>
-                <span className="holding-share" aria-label={`${share}% of the total`}>
-                  <span className="bar" aria-hidden="true">
-                    <span style={{ width: `${Math.min(100, share)}%` }} />
-                  </span>
-                  <span className="small muted">{r.value === undefined ? "–" : `${share}%`}</span>
-                </span>
-              </li>
-            );
-          })}
-        </ul>
+        <div className="table-wrap holdings-table-wrap">
+          <table className="holdings-table" data-testid="holdings-table">
+            <thead>
+              <tr>
+                <th scope="col">Token</th>
+                <th scope="col" className="num">
+                  Amount
+                </th>
+                <th scope="col" className="num">
+                  Value ({q})
+                </th>
+                <th scope="col" className="num">
+                  Share
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortByValue(v.rows).map((r) => {
+                const mint = r.mint.address.toBase58();
+                const share = r.value !== undefined ? sharePercent(r.value, v.total) : 0;
+                return (
+                  <tr key={mint} className="holding" data-testid={`holding-${mint}`}>
+                    <th scope="row" title={mint}>
+                      <span className="chip-token">
+                        <span className="dot" aria-hidden="true" />
+                        {rowName(r, labels)}
+                      </span>
+                    </th>
+                    <td className="num" title={r.balance === undefined ? undefined : exactUi(r.balance, r.mint.decimals)}>
+                      {r.balance === undefined ? <span className="muted">missing</span> : formatAmount(r.balance, r.mint.decimals)}
+                    </td>
+                    <td className="num" title={r.value === undefined ? undefined : `${exactUi(r.value, qd)} ${q}`}>
+                      {r.value === undefined ? <span className="muted">unknown</span> : formatValue(r.value, qd)}
+                    </td>
+                    <td className="num share-cell">
+                      {r.value === undefined ? (
+                        <span className="muted">–</span>
+                      ) : (
+                        <>
+                          <span className="bar" aria-hidden="true">
+                            <span style={{ width: `${Math.min(100, share)}%` }} />
+                          </span>
+                          {formatShare(share)}
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
-      {fees.map((r) => (
-        <p key={r.mint.address.toBase58()} className="small warn-text" data-testid="holding-fee-note">
-          {symOf(labels, r.mint.address.toBase58())}: withdrawing pays its {bpsToPercent(r.transferFeeBps)}% transfer fee (about{" "}
-          {formatApprox(r.withdrawFee, r.mint.decimals)} {symOf(labels, r.mint.address.toBase58())} on the whole balance).
-        </p>
-      ))}
-      <p className="small muted">
-        Estimate at each pool's current price, before transfer fees and price impact. Display only: it is not what a swap or withdrawal
-        would pay.
-      </p>
+      {fees.map((r) => {
+        const s = symOf(labels, r.mint.address.toBase58());
+        return (
+          <p key={r.mint.address.toBase58()} className="small warn-text" data-testid="holding-fee-note">
+            {s} has a {bpsToPercent(r.transferFeeBps)}% transfer fee: withdrawing all of it pays ≈ {formatAmount(r.withdrawFee, r.mint.decimals)} {s}.
+          </p>
+        );
+      })}
+      <p className="small muted">Estimate at each pool's current price, before transfer fees and price impact. Display only: not what a swap or withdrawal would pay.</p>
     </div>
   );
 }
 
-/** One-line value for a fund list item: "≈ 10.4 WXNT · 9.8 WXNT left to spend". */
+/** One-line value for a fund list item: "≈ 10.40 WXNT · 9.80 WXNT left to spend". */
 export function ValueLine({ state, view, quoteSymbol }: { state: ValuationState | { status: "error" }; view: FundView | null; quoteSymbol: string }) {
   if (state.status === "error") return <span className="value-line muted" data-testid="fund-value">value unknown</span>;
   if (state.status === "loading" || !view) return <span className="value-line muted" data-testid="fund-value">valuing…</span>;
@@ -111,13 +132,13 @@ export function ValueLine({ state, view, quoteSymbol }: { state: ValuationState 
   return (
     <span className="value-line" data-testid="fund-value">
       <strong>
-        ≈ {formatApprox(v.total, d)} {quoteSymbol}
+        ≈ {formatValue(v.total, d)} {quoteSymbol}
         {!v.complete && " + unknown"}
       </strong>
       {v.quoteBalance !== undefined && (
         <span className="muted">
           {" "}
-          · {formatApprox(v.quoteBalance, d)} {quoteSymbol} left to spend
+          · {formatValue(v.quoteBalance, d)} {quoteSymbol} left to spend
         </span>
       )}
     </span>

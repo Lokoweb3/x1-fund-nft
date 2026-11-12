@@ -168,22 +168,20 @@ export function sharePercent(part: bigint, total: bigint): number {
 }
 
 /**
- * Short display amount: thousands separators, at most 4 fraction digits
- * (2 at 1,000 and above), and 4 significant digits below 1. Truncates.
+ * Holding rows for display: by value, highest first; unknown values last
+ * (in vault order).
  */
-export function formatApprox(raw: bigint, decimals: number): string {
-  const base = 10n ** BigInt(decimals);
-  const whole = raw / base;
-  const fracDigits = (raw % base).toString().padStart(decimals, "0");
-  let frac: string;
-  if (whole > 0n) frac = fracDigits.slice(0, whole >= 1000n ? 2 : 4);
-  else {
-    const lead = fracDigits.search(/[1-9]/);
-    frac = lead < 0 ? "" : fracDigits.slice(0, lead + 4);
-  }
-  frac = frac.replace(/0+$/, "");
-  const w = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return frac ? `${w}.${frac}` : w;
+export function sortByValue(rows: HoldingRow[]): HoldingRow[] {
+  return rows
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => {
+      if (a.r.value === undefined || b.r.value === undefined) {
+        if (a.r.value === b.r.value) return a.i - b.i;
+        return a.r.value === undefined ? 1 : -1;
+      }
+      return a.r.value === b.r.value ? a.i - b.i : a.r.value > b.r.value ? -1 : 1;
+    })
+    .map((x) => x.r);
 }
 
 /** Read each non-cash target's pinned pool and its two vaults (one RPC round trip). */

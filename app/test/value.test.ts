@@ -7,7 +7,8 @@ import { test } from "node:test";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import type { MintMeta } from "@core/owner.js";
 import { POOL_DISCRIMINATOR, POOL_LEN, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@core/pool.js";
-import { feeBps, formatApprox, netReserve, readPoolFees, sharePercent, valueHoldings, valueInQuote, withdrawFeeFor, type PoolSnapshot } from "../src/lib/value.js";
+import { feeBps, sortByValue, netReserve, readPoolFees, sharePercent, valueHoldings, valueInQuote, withdrawFeeFor, type PoolSnapshot } from "../src/lib/value.js";
+import { exactUi, formatAmount, formatShare, formatValue } from "../src/lib/format.js";
 
 const k = () => Keypair.generate().publicKey;
 const quoteMint = k();
@@ -44,7 +45,7 @@ test("decimals mismatch: raw reserves carry the decimals", () => {
   const p = pool(quoteMint, 4_000n * 10n ** 9n, targetMint, 1_000n * 10n ** 6n);
   const v = valueInQuote(25n * 10n ** 5n /* 2.5 target */, targetMint, quoteMint, p);
   assert.equal(v, 10n * 10n ** 9n); // 10 quote
-  assert.equal(formatApprox(v!, 9), "10");
+  assert.equal(formatValue(v!, 9), "10.00");
 });
 
 test("empty pool, unknown reserve, or a pool for other mints: unknown", () => {
@@ -106,13 +107,47 @@ test("holdings: quote counts 1:1, missing vault and missing pool are unknown, to
   assert.equal(sharePercent(1n, 0n), 0);
 });
 
-test("formatApprox: separators, short fractions, significant digits below 1", () => {
-  assert.equal(formatApprox(9_812_345_678n, 9), "9.8123");
-  assert.equal(formatApprox(1_119_612_345_678n, 9), "1,119.61");
-  assert.equal(formatApprox(1_234n, 9), "0.000001234");
-  assert.equal(formatApprox(0n, 9), "0");
-  assert.equal(formatApprox(12_000_000n, 6), "12");
-  assert.equal(formatApprox(7n, 0), "7");
+test("formatAmount: no decimals from 1,000, 2 max from 1, 4 significant below 1 with subscript zeros", () => {
+  assert.equal(formatAmount(3_036_600_000_000n, 9), "3,036");
+  assert.equal(formatAmount(1_234_567_000_000_000n, 9), "1,234,567");
+  assert.equal(formatAmount(1_119_612_345_678n, 9), "1,119");
+  assert.equal(formatAmount(9_500_000_000n, 9), "9.5");
+  assert.equal(formatAmount(9_812_345_678n, 9), "9.81");
+  assert.equal(formatAmount(12_000_000n, 6), "12");
+  assert.equal(formatAmount(7n, 0), "7");
+  assert.equal(formatAmount(0n, 9), "0");
+  assert.equal(formatAmount(500_000_000n, 9), "0.5");
+  assert.equal(formatAmount(123_456_789n, 9), "0.1234");
+  assert.equal(formatAmount(1_234_567n, 9), "0.001234"); // two zeros: plain
+  assert.equal(formatAmount(50_240n, 9), "0.0₄5024"); // 0.00005024
+  assert.equal(formatAmount(98_250n, 9), "0.0₄9825");
+  assert.equal(formatAmount(1n, 18), "0.0₁₇1");
+  assert.equal(exactUi(50_240n, 9), "0.00005024");
+  for (const raw of [50_240n, 1n, 123_456_789n, 1_234_567n, 9_812_345_678n]) assert.ok(formatAmount(raw, 9).replace(/[^0-9₀-₉]/g, "").length <= 8, String(raw));
+});
+
+test("formatValue: 2 decimals from 1, 4 below, <0.0001 for dust", () => {
+  assert.equal(formatValue(9_973_512_345n, 9), "9.97");
+  assert.equal(formatValue(9_500_000_000n, 9), "9.50");
+  assert.equal(formatValue(1_234_500_000_000n, 9), "1,234.50");
+  assert.equal(formatValue(225_123_456n, 9), "0.2251");
+  assert.equal(formatValue(123_900n, 9), "0.0001");
+  assert.equal(formatValue(99_999n, 9), "<0.0001");
+  assert.equal(formatValue(0n, 9), "0");
+  assert.equal(formatValue(5n, 0), "5.00");
+  assert.equal(formatShare(95.2), "95%");
+  assert.equal(formatShare(1.2), "1%");
+  assert.equal(formatShare(0.3), "<1%");
+  assert.equal(formatShare(0), "0%");
+});
+
+test("sortByValue: highest value first, unknown last in vault order", () => {
+  const m = (value: bigint | undefined, n: number) => ({ value, n }) as unknown as Parameters<typeof sortByValue>[0][number];
+  const rows = [m(5n, 0), m(undefined, 1), m(90n, 2), m(undefined, 3), m(5n, 4), m(0n, 5)];
+  assert.deepEqual(
+    sortByValue(rows).map((r) => (r as unknown as { n: number }).n),
+    [2, 0, 4, 5, 1, 3],
+  );
 });
 
 test("transfer-fee note uses the schedule in force at the epoch, and the maximum-fee cap", () => {
