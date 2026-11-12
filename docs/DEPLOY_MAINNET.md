@@ -62,6 +62,56 @@ sha256sum /tmp/fund_nft-onchain.so target/deploy/fund_nft.so   # must match
 
 After deploying, back up `keys/fund_nft-mainnet.json` and the deployer keypair offline. The deployer is the upgrade authority.
 
+## Canary walkthrough
+
+Run this after the deploy has been verified. Use the owner's own wallet and small amounts. The fund below is USDC.X with a 20% cash slice and 80% TEST through the USDC.X/TEST pool; swap in the real basket. Each step is simulated first. Read the summary and the simulation logs before adding the send flags.
+
+```sh
+cd ~/X1_PROJECTS/X1_FundNFT/keeper
+npm ci
+export RPC_URL=https://rpc.mainnet.x1.xyz
+OWNER=<owner wallet pubkey>
+OWNER_KEYPAIR=<path to the owner's keypair>
+USDC=B69chRzqzDCmdB5WYB8NRu5Yv5ZA95ABiZcdzCgGm9Tq
+TEST=C9P839X3i1ijPyCvHEg3HpbEVjBLHJdxGXjez3yVn3Rz
+POOL=7drPqaqcXcyYmdo62xucGqZzALuPCbGBCXCT41nWMmQD
+SEND="--send --cluster mainnet --i-understand-mainnet"
+
+# 1. Simulate create-fund. No keypair is loaded. Check the bounds, the pool
+#    check, the summary, and "simulation: ok" for both transactions.
+npx tsx src/cli.ts create-fund --quote $USDC \
+  --target $USDC:default:2000 --target $TEST:$POOL:8000 \
+  --per-run 100000 --interval 3600 --window 3600 --max-dev-bps 300 --payer $OWNER
+
+# 2. Create a small fund. The NFT mint is new on every run, so copy the
+#    printed fund PDA from this run.
+KEYPAIR=$OWNER_KEYPAIR npx tsx src/cli.ts create-fund --quote $USDC \
+  --target $USDC:default:2000 --target $TEST:$POOL:8000 \
+  --per-run 100000 --interval 3600 --window 3600 --max-dev-bps 300 $SEND
+FUND=<fund PDA printed above>
+
+# 3. Deposit a small amount (1 USDC.X = 1000000 raw). Simulate, then send.
+npx tsx src/cli.ts deposit --fund $FUND --amount 1000000 --payer $OWNER
+KEYPAIR=$OWNER_KEYPAIR npx tsx src/cli.ts deposit --fund $FUND --amount 1000000 $SEND
+
+# 4. Show: budgets 0.2 cash / 0.8 TEST, the TEST target "due now", the
+#    quote vault at 1 USDC.X and the TEST vault at 0.
+npx tsx src/cli.ts show --fund $FUND
+
+# 5. Crank: the keeper dry-run must list this fund's TEST target and print
+#    the execute_dca accounts. Whether the keeper sends on mainnet is the
+#    owner's call (see "Keeper on mainnet").
+env -u KEYPAIR npx tsx src/index.ts --dry-run
+
+# 6. Withdraw. Quote first; a quote withdraw shrinks the budgets in
+#    proportion. After a crank, withdraw TEST the same way with --mint $TEST.
+npx tsx src/cli.ts withdraw --fund $FUND --mint $USDC --amount all --payer $OWNER
+KEYPAIR=$OWNER_KEYPAIR npx tsx src/cli.ts withdraw --fund $FUND --mint $USDC --amount all $SEND
+npx tsx src/cli.ts show --fund $FUND
+```
+
+Before the deploy, step 1 fails with `program 6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM is not deployed on this RPC (https://rpc.mainnet.x1.xyz, mainnet)`. The CLI reaches that point only after the local bound checks and the pool check have passed.
+
 ## Trust the canary relies on
 
 - **Upgrade authority.** The deployer key can replace the program, including with code that moves every vault. Before outside users deposit, move it to a multisig, or freeze it with `solana program set-upgrade-authority <ID> --final`, which is irreversible.
