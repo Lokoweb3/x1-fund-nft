@@ -98,7 +98,7 @@ Safety follows the keeper and reuses `keeper/src/cluster.ts`:
 
 ## Owner web app
 
-`app/` is a local web app that does the same work as the owner CLI from a browser wallet (Backpack or any other Wallet Standard wallet). It lists the funds your wallet's NFTs control, shows a fund's targets, budgets and vaults, and creates funds, deposits, withdraws and runs ensure-vaults. It also shows a read-only keeper status. Run it with `cd app && npm install && npm run dev` and open http://127.0.0.1:5173. The dev server binds to loopback only.
+`app/` is a local web app that does the same work as the owner CLI from a browser wallet (Backpack or any other Wallet Standard wallet). It lists the funds your wallet's NFTs control, shows a fund's targets, budgets and vaults, and creates funds, deposits, withdraws and runs ensure-vaults. It also shows a read-only keeper status. Run it with `cd app && npm ci && npm run dev` and open http://127.0.0.1:5173. The dev server binds to loopback only.
 
 The app does not have its own transaction builders. The CLI's bounds, builders, planners, size checks, fee math and `sendPlan` live in browser-safe `keeper/src/core/`, and both the CLI and the app import them. The app keeps the CLI's safety model:
 
