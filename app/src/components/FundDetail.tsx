@@ -17,7 +17,8 @@ import { useTokenLabels } from "../lib/lookups";
 import { bpsToPercent, countdown, humanInterval } from "../lib/wizard";
 import { ArtStep, type ArtResult } from "./ArtStep";
 import { HoldingsCard, useValuation, type ValuationState } from "./Holdings";
-import { NftCard } from "./NftCard";
+import { NftCard, NftCardActions } from "./NftCard";
+import { CARD_ACTION_LABEL, cardActionForRun, cardActionStates, DEPOSIT_NOTE, heldByProgram, statusOnCard, type CardAction } from "../lib/card_actions";
 
 /** Light polling: at most every 30 s, only while the tab is visible. */
 const POLL_MS = 30_000;
@@ -36,6 +37,9 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
   const [review, setReview] = useState<Review | null>(null);
   const [busy, setBusy] = useState("");
   const [actionError, setActionError] = useState<unknown>(null);
+  // The last run() name: decides whether its progress and error show on the card or under Actions.
+  const [lastRun, setLastRun] = useState("");
+  const [cardOpen, setCardOpen] = useState<CardAction | null>(null);
   const net = s.net;
   const fundKey = useMemo(() => new PublicKey(fund), [fund]);
   const loads = useRef(createLatest()).current;
@@ -83,6 +87,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
     setReview(null);
     setError("");
     setActionError(null);
+    setCardOpen(null);
   }, [net, fund, loads, builds]);
 
   useEffect(() => {
@@ -121,6 +126,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
     setActionError(null);
     setReview(null);
     setBusy(name);
+    setLastRun(name);
     try {
       const r = await builds.run(build());
       const now = s.live();
@@ -144,6 +150,30 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
     [valuation, view, nativeAvailable],
   );
   const holder = !!payer && !!view?.nftAccount && view.nftAccount.owner.equals(payer);
+  const escrow = heldByProgram(view?.nftAccount);
+  const cardStates = cardActionStates({ wallet: payer, holder: view?.nftAccount?.owner, heldByProgram: escrow });
+  // A form whose button is off (wallet gone, holder changed, NFT listed) closes.
+  const openAction = cardOpen && cardStates[cardOpen].enabled ? cardOpen : null;
+  // A run's status shows in its own action's panel only; a late result never lands in another action's panel.
+  const onCard = statusOnCard(lastRun, openAction);
+  const runAction = cardActionForRun(lastRun);
+  const status = net && (
+    <>
+      {busy && <p className="muted">Building and simulating {busy}...</p>}
+      {actionError !== null && !onCard && runAction && (
+        <p className="small" data-testid="action-error-for">
+          <strong>{CARD_ACTION_LABEL[runAction]}:</strong>
+        </p>
+      )}
+      {actionError !== null && <FriendlyError err={actionError} cluster={net.cluster} testId="action-error" />}
+    </>
+  );
+
+  // A review built from the card lands below the Actions panel; bring it into view.
+  useEffect(() => {
+    if (review && runAction) document.querySelector('[data-testid="review"]')?.scrollIntoView?.({ block: "nearest" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [review]);
 
   return (
     <>
@@ -165,7 +195,42 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
         {view && (
           <>
             <div className="fund-hero">
-              {net && <NftCard net={net} view={view} sendTick={s.sendTick} holdings={holdings} labels={labels} />}
+              {net && (
+                <NftCard
+                  net={net}
+                  view={view}
+                  sendTick={s.sendTick}
+                  holdings={holdings}
+                  labels={labels}
+                  actions={
+                    <NftCardActions states={cardStates} open={openAction} onToggle={setCardOpen} heldByProgram={escrow}>
+                      {openAction === "deposit" && (
+                        <DepositForm
+                          decimals={decimals}
+                          disabled={!actionsEnabled}
+                          onReview={(amount) => run("deposit", () => reviewDeposit(net, payer!, fundKey, amount, labels))}
+                        />
+                      )}
+                      {openAction === "withdraw" && (
+                        <WithdrawForm
+                          view={view}
+                          disabled={!actionsEnabled}
+                          onReview={(mint, amount) => run("withdraw", () => reviewWithdraw(net, payer!, fundKey, mint, amount, labels))}
+                        />
+                      )}
+                      {openAction === "native" && native && (
+                        <NativeWithdrawForm
+                          native={native}
+                          holder={holder}
+                          disabled={!actionsEnabled}
+                          onReview={(amount) => run("native withdraw", () => reviewWithdrawNative(net, payer!, fundKey, amount))}
+                        />
+                      )}
+                      {onCard && status}
+                    </NftCardActions>
+                  }
+                />
+              )}
               <HoldingsCard state={holdings} view={view} labels={labels} />
             </div>
             <FundSummary view={view} labels={labels} />
@@ -295,32 +360,14 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
         <section className="panel actions">
           <h3>Actions</h3>
           {!payer && <p className="muted small">Connect a wallet: each action builds and simulates with it as the fee payer.</p>}
-          <DepositForm
-            decimals={decimals}
-            disabled={!actionsEnabled}
-            onReview={(amount) => run("deposit", () => reviewDeposit(net, payer!, fundKey, amount, labels))}
-          />
-          <WithdrawForm
-            view={view}
-            disabled={!actionsEnabled}
-            onReview={(mint, amount) => run("withdraw", () => reviewWithdraw(net, payer!, fundKey, mint, amount, labels))}
-          />
-          {native && (
-            <NativeWithdrawForm
-              native={native}
-              holder={holder}
-              disabled={!actionsEnabled}
-              onReview={(amount) => run("native withdraw", () => reviewWithdrawNative(net, payer!, fundKey, amount))}
-            />
-          )}
+          <p className="small muted">Deposit and withdraw are on the NFT card above.</p>
           <div className="row wrap">
             <button disabled={!actionsEnabled} onClick={() => void run("ensure", () => reviewEnsureVaults(net, payer!, fundKey))} data-testid="ensure-vaults">
               Ensure vaults
             </button>
             <span className="small muted">Creates any missing quote/target vault account. Idempotent.</span>
           </div>
-          {busy && <p className="muted">Building and simulating {busy}...</p>}
-          {actionError !== null && <FriendlyError err={actionError} cluster={net.cluster} testId="action-error" />}
+          {!onCard && status}
         </section>
       )}
 
@@ -353,6 +400,9 @@ function DepositForm({ decimals, disabled, onReview }: { decimals: number; disab
   };
   return (
     <div className="form-row">
+      <p className="small muted form-note" data-testid="deposit-note">
+        {DEPOSIT_NOTE}
+      </p>
       <label>
         Deposit (quote, UI units){" "}
         <input aria-label="Deposit amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="1.5" />

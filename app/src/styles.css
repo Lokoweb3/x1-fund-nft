@@ -1014,6 +1014,55 @@ button.nft-allow:hover:not(:disabled) {
   flex-wrap: wrap;
   font-size: 1.05rem;
 }
+.nft-body:not(:last-child) {
+  border-radius: 0;
+}
+/* Deposit / withdraw on the card; the open form sits right below the buttons. */
+.nft-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 14px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 15px 15px;
+}
+.nft-actions p {
+  margin: 0;
+}
+.nft-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.nft-action-row button {
+  flex: 1 1 auto;
+}
+.nft-action-panel {
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  min-width: 0;
+}
+.nft-action-panel .form-row {
+  margin: 8px 0 0;
+}
+.nft-action-panel label {
+  min-width: 0;
+  max-width: 100%;
+}
+.nft-action-panel select,
+.nft-action-panel input:not([type="checkbox"]) {
+  max-width: 100%;
+  min-width: 0;
+}
+.nft-action-panel .native-withdraw p {
+  margin: 6px 0;
+}
+.form-note {
+  flex-basis: 100%;
+  margin: 0;
+}
 /* ---- fund list thumbnails ---- */
 .fund-item {
   display: grid;
