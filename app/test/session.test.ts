@@ -77,6 +77,7 @@ function reviewFor(net: NetworkInfo, payer: PublicKey): Review {
     cluster: net.cluster,
     payer,
     plan,
+    sentences: [],
     rows: [],
     warnings: [],
     sims: [],

@@ -25,7 +25,7 @@ test("percentages convert to basis points exactly", () => {
   assert.equal(percentToBps("100"), 10_000);
   assert.equal(percentToBps(" 12.3 % "), 1230);
   assert.equal(percentToBps("7."), 700);
-  for (const bad of ["", "abc", "-1", "1.234", "100.01", "1e2", "0x10"]) assert.throws(() => percentToBps(bad), undefined, bad);
+  for (const bad of ["", "abc", "-1", "1.234", "100.01", "1e2", "0x10"]) assert.throws(() => percentToBps(bad), Error, bad);
   assert.equal(bpsToPercent(3333), "33.33");
   assert.equal(bpsToPercent(8050), "80.5");
   assert.equal(bpsToPercent(2000), "20");
