@@ -103,3 +103,16 @@ test("'all' encodes the available amount read when the review is built, not when
   assert.match(review.sentences[0]!, /^You move 0\.700000123 XNT \(native\)/);
   assert.match(review.sentences[1]!, /after this, 0 XNT is left to withdraw\./);
 });
+
+test("'all' with a stale 0.3 XNT on screen encodes the fresh 500000000 and the review says 0.5", async () => {
+  const { net, state } = await fakeNet();
+  state.lamports = RENT + 300_000_000;
+  const stale = await readNativeBalance(net.connection, fund);
+  assert.ok(stale.exact && stale.available === 300_000_000n);
+  const amount = parseNativeAmount("", true, stale);
+  state.lamports = RENT + 500_000_000;
+  const review = await reviewWithdrawNative(net, holder, fund, amount);
+  assert.equal(encodedAmount(review), 500_000_000n);
+  assert.match(review.sentences[0]!, /^You move 0\.5 XNT \(native\)/);
+  assert.ok(review.rows.some(([k, v]) => k === "Amount" && v === "0.5 XNT (raw 500000000 lamports)"));
+});
