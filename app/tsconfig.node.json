@@ -40,6 +40,7 @@
     "vite.config.ts",
     "playwright.config.ts",
     "test",
-    "e2e"
+    "e2e",
+    "browser-test"
   ]
 }

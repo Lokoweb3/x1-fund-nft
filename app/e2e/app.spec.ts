@@ -241,7 +241,8 @@ test("NFT art from inscription #63 (Check), JSON inscribed on localnet, then cre
     const host = new URL(r.url()).hostname;
     // The app connects to its default RPC (X1 mainnet) on load, before the test picks the local one.
     if (host === "127.0.0.1" || host === "localhost" || host === "rpc.mainnet.x1.xyz") return;
-    if (host === "www.x1inscriptions.io" || host === "63.x1ins.xyz") {
+    // Any <n>.x1ins.xyz: My funds auto-loads the new fund's picture from its inscribed uri.
+    if (host === "www.x1inscriptions.io" || /^[0-9]+\.x1ins\.xyz$/.test(host)) {
       if (!checked) early.push(r.url());
       return;
     }
@@ -261,6 +262,8 @@ test("NFT art from inscription #63 (Check), JSON inscribed on localnet, then cre
     return route.fulfill({ headers: cors, contentType: "image/gif", body: Buffer.from("R0lGODlhAQABAAAAACw=", "base64") });
   });
   await page.route("https://63.x1ins.xyz/**", (route) => route.fulfill({ headers: { ...cors, "content-length": "393222" }, contentType: "video/mp4", body: "" }));
+  // Other inscription gateways (the new fund's metadata uri): answered locally, nothing leaves the machine.
+  await page.route(/^https:\/\/(?!63\.)[0-9]+\.x1ins\.xyz\//, (route) => route.fulfill({ headers: cors, contentType: "application/json", body: "{}" }));
 
   await page.goto("/");
   await connectTo(page, "local");

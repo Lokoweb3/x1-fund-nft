@@ -8,6 +8,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "test": "tsx --tsconfig tsconfig.test.json --test test/*.test.ts test/*.test.tsx",
+    "test:browser": "tsx --test browser-test/*.test.ts",
     "e2e": "playwright test"
   },
   "dependencies": {

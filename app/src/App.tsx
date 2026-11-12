@@ -331,7 +331,20 @@ function Shell() {
   return (
     <div className="app">
       <header className="top">
-        <h1>Fund NFT owner</h1>
+        <div className="brand">
+          <svg className="brand-mark" viewBox="0 0 32 32" width="34" height="34" aria-hidden="true" focusable="false">
+            <defs>
+              <linearGradient id="brand-g" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stopColor="#8b6cff" />
+                <stop offset="1" stopColor="#22d3ee" />
+              </linearGradient>
+            </defs>
+            <rect x="1" y="1" width="30" height="30" rx="9" fill="url(#brand-g)" />
+            <path d="M9 10l14 12M23 10L9 22" stroke="#0b0d14" strokeWidth="3.2" strokeLinecap="round" />
+          </svg>
+          <h1>Fund NFT owner</h1>
+          <span className="brand-sub">X1 DCA funds</span>
+        </div>
         <nav>
           <button disabled={sendPending} title={lock} className={view.name === "funds" || view.name === "fund" ? "tab on" : "tab"} onClick={() => go({ name: "funds" })}>
             My funds
@@ -449,7 +462,7 @@ function Shell() {
           />
         )}
       </main>
-      <footer className="small muted">
+      <footer className="small muted footer">
         Local app: no analytics, no external fonts or CDNs. The app never asks for a secret key; your wallet signs.
       </footer>
     </div>

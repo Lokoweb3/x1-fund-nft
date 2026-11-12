@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fundPda, parsePubkey, PROGRAM_ID } from "@core/owner.js";
-import { findFundsHeldBy, readFundMetadata, type HeldFund } from "@core/rpc.js";
+import { findFundsHeldBy, loadFundView, readFundMetadata, type FundView, type HeldFund } from "@core/rpc.js";
 import type { StoredMetadata } from "@core/metadata.js";
 import { useTokenLabels } from "../lib/lookups";
 import { bpsToPercent } from "../lib/wizard";
@@ -9,6 +9,9 @@ import { makeProgram } from "../lib/actions";
 import { createLatest } from "../lib/latest";
 import { signerId } from "../lib/session";
 import { errMsg, Short } from "./ui";
+import { ValueLine } from "./Holdings";
+import { NftThumb, PictureConsent, usePicture } from "./NftCard";
+import { loadValuation, type Valuation } from "../lib/value";
 
 /** Identity a fund list was loaded under: network generation, RPC and wallet. */
 function listKey(generation: number | undefined, rpcUrl: string | undefined, signer: string | null): string {
@@ -16,7 +19,8 @@ function listKey(generation: number | undefined, rpcUrl: string | undefined, sig
 }
 
 export function MyFunds({ s }: { s: AppState }) {
-  const [funds, setFunds] = useState<{ key: string; list: HeldFund[] } | null>(null);
+  const [funds, setFunds] = useState<{ key: string; list: HeldFund[]; rev: number } | null>(null);
+  const revRef = useRef(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const owner = s.signer?.publicKey ?? null;
@@ -34,7 +38,8 @@ export function MyFunds({ s }: { s: AppState }) {
     try {
       const r = await loads.run(findFundsHeldBy(net.connection, makeProgram(net), owner));
       if (r.stale || keyRef.current !== mine) return;
-      setFunds({ key: mine, list: r.value });
+      // A new revision on every successful load, so Refresh also refetches each value.
+      setFunds({ key: mine, list: r.value, rev: ++revRef.current });
     } catch (err) {
       if (keyRef.current !== mine) return;
       setFunds(null);
@@ -80,7 +85,7 @@ export function MyFunds({ s }: { s: AppState }) {
         {list && list.length > 0 && (
           <ul className="funds" data-testid="my-funds">
             {list.map((f) => (
-              <FundItem key={f.fund.toBase58()} s={s} f={f} />
+              <FundItem key={f.fund.toBase58()} s={s} f={f} rev={funds!.rev} />
             ))}
           </ul>
         )}
@@ -90,8 +95,11 @@ export function MyFunds({ s }: { s: AppState }) {
   );
 }
 
-/** One fund: the NFT's stored name and symbol (read from chain; the uri is shown, never fetched) and what it buys. */
-function FundItem({ s, f }: { s: AppState; f: HeldFund }) {
+/**
+ * One fund: the NFT's picture (auto-fetched only from X1 Inscriptions hosts,
+ * see lib/nft_picture.ts), its stored name and symbol, value, and what it buys.
+ */
+function FundItem({ s, f, rev }: { s: AppState; f: HeldFund; rev: number }) {
   const net = s.net;
   const [md, setMd] = useState<{ key: string; stored: StoredMetadata | undefined } | null>(null);
   const key = `${net?.generation}|${f.nftMint.toBase58()}|${s.sendTick}`;
@@ -109,33 +117,64 @@ function FundItem({ s, f }: { s: AppState; f: HeldFund }) {
   }, [key]);
   const labels = useTokenLabels(net, [f.account.quoteMint, ...f.account.targets.map((t) => t.mint)]);
   const stored = md && md.key === key ? md.stored : undefined;
+  const { picture, allow } = usePicture(stored?.uri, `${key}|${f.fund.toBase58()}`);
   const q = labels[f.account.quoteMint.toBase58()]?.symbol ?? "?";
   const buys = f.account.targets
     .filter((t) => !t.mint.equals(f.account.quoteMint))
     .map((t) => `${labels[t.mint.toBase58()]?.symbol ?? "?"} ${bpsToPercent(t.bps)}%`);
   const cash = f.account.targets.find((t) => t.mint.equals(f.account.quoteMint));
   return (
-    <li data-testid="fund-item">
-      <div>
-        <strong data-testid="fund-name">{stored ? `${stored.name} (${stored.symbol})` : "Unnamed fund"}</strong>{" "}
-        <span className="small">
-          pays with {q}, buys {buys.join(", ") || "nothing"}
-          {cash ? `, keeps ${bpsToPercent(cash.bps)}% as cash` : ""}
+    <li data-testid="fund-item" className="fund-item">
+      <NftThumb picture={picture} name={stored?.name || "Unnamed fund"} />
+      <div className="fund-item-body">
+        <FundValue s={s} f={f} quoteSymbol={q} rev={rev} />
+        <PictureConsent picture={picture} onAllow={allow} />
+        <div>
+          <strong data-testid="fund-name">{stored ? `${stored.name} (${stored.symbol})` : "Unnamed fund"}</strong>{" "}
+          <span className="small">
+            pays with {q}, buys {buys.join(", ") || "nothing"}
+            {cash ? `, keeps ${bpsToPercent(cash.bps)}% as cash` : ""}
+          </span>
+        </div>
+        {stored && (
+          <div className="small muted">
+            metadata <span className="mono" data-testid="fund-uri">{stored.uri}</span>
+          </div>
+        )}
+        <button className="link mono" disabled={s.sendPending} onClick={() => s.go({ name: "fund", fund: f.fund.toBase58() })} data-testid="fund-link">
+          {f.fund.toBase58()}
+        </button>
+        <span className="small muted">
+          {" "}
+          NFT <Short value={f.nftMint.toBase58()} />
         </span>
       </div>
-      {stored && (
-        <div className="small muted">
-          metadata <span className="mono" data-testid="fund-uri">{stored.uri}</span>
-        </div>
-      )}
-      <button className="link mono" disabled={s.sendPending} onClick={() => s.go({ name: "fund", fund: f.fund.toBase58() })} data-testid="fund-link">
-        {f.fund.toBase58()}
-      </button>
-      <span className="small muted">
-        {" "}
-        NFT <Short value={f.nftMint.toBase58()} />
-      </span>
     </li>
+  );
+}
+
+/** Estimated value of one listed fund, loaded on its own; a failure shows "value unknown". Display only. */
+function FundValue({ s, f, quoteSymbol, rev }: { s: AppState; f: HeldFund; quoteSymbol: string; rev: number }) {
+  const net = s.net;
+  const key = `${net?.generation}|${f.fund.toBase58()}|${s.sendTick}|${rev}`;
+  const [st, setSt] = useState<{ key: string; view: FundView; valuation: Valuation } | { key: string; error: true } | null>(null);
+  useEffect(() => {
+    if (!net) return;
+    let cancelled = false;
+    (async () => {
+      const view = await loadFundView(net.connection, makeProgram(net), f.fund, BigInt(Math.floor(Date.now() / 1000)));
+      const valuation = await loadValuation(net.connection, view);
+      if (!cancelled) setSt({ key, view, valuation });
+    })().catch(() => !cancelled && setSt({ key, error: true }));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  const cur = st && st.key === key ? st : null;
+  if (cur && "error" in cur) return <ValueLine state={{ status: "error" }} view={null} quoteSymbol={quoteSymbol} />;
+  return (
+    <ValueLine state={cur ? { status: "ok", valuation: cur.valuation } : { status: "loading" }} view={cur ? cur.view : null} quoteSymbol={quoteSymbol} />
   );
 }
 
