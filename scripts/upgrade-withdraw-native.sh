@@ -107,18 +107,19 @@ show_json() { solana program show "$PROGRAM_ID" --output json; }
 keygen_pubkey() { "$SOLANA_BIN_DIR/solana-keygen" -C "$CFG" pubkey "$1"; }
 # Classify a `program dump` of ProgramData: new (the reviewed build), old
 # (exactly the current mainnet build), old+zero (the current build followed
-# only by zero bytes: extended, not yet deployed), or unknown.
+# by zero bytes up to exactly NEW_LEN: extended, not yet deployed), or
+# unknown. The caller also requires dump length == ProgramData data length.
 classify_dump() {
-  python3 -I - "$1" "$OLD_LEN" "$OLD_SHA" "$NEW_SHA" <<'PY'
+  python3 -I - "$1" "$OLD_LEN" "$OLD_SHA" "$NEW_SHA" "$NEW_LEN" <<'PY'
 import hashlib, sys
-path, old_len, old_sha, new_sha = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+path, old_len, old_sha, new_sha, new_len = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5])
 d = open(path, "rb").read()
 h = lambda b: hashlib.sha256(b).hexdigest()
 if h(d) == new_sha:
     print("new")
 elif len(d) == old_len and h(d) == old_sha:
     print("old")
-elif len(d) > old_len and h(d[:old_len]) == old_sha and not any(d[old_len:]):
+elif len(d) == new_len and h(d[:old_len]) == old_sha and not any(d[old_len:]):
     print("old+zero")
 else:
     print("unknown")
@@ -208,13 +209,15 @@ PY
   dump_class="$(classify_dump "$TMP/onchain.so")" || die "could not classify the program dump"
   dump_len="$(stat -c %s "$TMP/onchain.so")" || die "stat dump"
   echo "on-chain dump: $dump_len bytes, sha256 $(sha "$TMP/onchain.so") ($dump_class)"
+  # The dump must be the whole ProgramData payload (observed: full data length).
+  [ "$dump_len" = "$DATA_LEN" ] || dump_class="unknown"
   case "$DATA_LEN:$dump_class" in
     "$OLD_LEN:old")
       STATE=extend; EXTEND_BY=$((NEW_LEN - DATA_LEN))
       pass "on-chain code is the current build $OLD_SHA; data length $DATA_LEN: extend by $EXTEND_BY bytes, then deploy" ;;
     "$NEW_LEN:new")
       STATE=upgraded; pass "data length $DATA_LEN and the on-chain program is already $NEW_SHA: nothing to do" ;;
-    "$NEW_LEN:old+zero"|"$NEW_LEN:old")
+    "$NEW_LEN:old+zero")
       STATE=extended
       pass "data length $DATA_LEN, current build $OLD_SHA plus zero padding (already extended, not yet deployed): no extend, deploy only" ;;
     *)
