@@ -135,7 +135,14 @@ pub fn handle_attach_metadata(
     let bump_seed = [ctx.accounts.fund.bump];
     let signer: &[&[u8]] = &[FUND_SEED, nft_mint.as_ref(), &bump_seed];
     let fund_info = ctx.accounts.fund.to_account_info();
-    let holder_before = ctx.accounts.holder.lamports();
+    let payer_state = |info: &AccountInfo| crate::metaplex::PayerState {
+        owner: *info.owner,
+        data_len: info.data_len(),
+        lamports: info.lamports(),
+    };
+    let holder_before = payer_state(&ctx.accounts.holder.to_account_info());
+    // Refuse up front if the holder is not an ordinary wallet.
+    crate::metaplex::payer_preserved(holder_before, holder_before).map_err(map_payer)?;
 
     metadata::create_metadata_accounts_v3(
         CpiContext::new_with_signer(
@@ -194,12 +201,10 @@ pub fn handle_attach_metadata(
         FundError::NftMintAuthority
     );
     // Bound the holder's wallet exposure to Token Metadata (an upgradeable
-    // program that received the holder signer and the System Program).
-    let debit = holder_before.saturating_sub(ctx.accounts.holder.lamports());
-    require!(
-        debit <= crate::metaplex::MAX_ATTACH_DEBIT_LAMPORTS,
-        FundError::AttachCostTooHigh
-    );
+    // program that received the holder signer and the System Program): it
+    // must still be a System-owned wallet with no data, debited at most the cap.
+    crate::metaplex::payer_preserved(holder_before, payer_state(&ctx.accounts.holder.to_account_info()))
+        .map_err(map_payer)?;
     emit!(MetadataAttached {
         fund: fund_key,
         nft_mint,
@@ -277,4 +282,13 @@ pub fn handle_update_metadata(
         holder: ctx.accounts.holder.key(),
     });
     Ok(())
+}
+
+fn map_payer(change: crate::metaplex::PayerChange) -> Error {
+    use crate::metaplex::PayerChange::*;
+    match change {
+        NotAWallet => error!(FundError::PayerNotWallet),
+        Reassigned | Allocated => error!(FundError::PayerChanged),
+        OverDebited => error!(FundError::AttachCostTooHigh),
+    }
 }

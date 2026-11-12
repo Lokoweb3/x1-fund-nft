@@ -106,4 +106,8 @@ pub enum FundError {
     NothingToUpdate,
     #[msg("Token Metadata took more from the holder than the attach cost cap allows")]
     AttachCostTooHigh,
+    #[msg("The NFT holder paying for attach must be an ordinary System-owned wallet with no data")]
+    PayerNotWallet,
+    #[msg("Token Metadata changed the holder account's owner or data")]
+    PayerChanged,
 }
