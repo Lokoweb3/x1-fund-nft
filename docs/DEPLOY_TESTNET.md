@@ -43,7 +43,7 @@ anchor build --arch v0 -- --features testnet
 
 `--arch v0` is required: Anchor 1.2.2 defaults to `--arch v3`, and X1 mainnet and testnet have SBPF v1 and v3 deployment inactive, so a v3 `.so` (ELF `e_flags` 3) cannot be deployed there. `--features testnet` switches the program's single allowed pool program to the testnet XDEX id (see below). Without it the build only accepts mainnet XDEX pools.
 
-Program id in the source: `BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck`.
+Program id in the source: `6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM` (mainnet canary key, held by the owner in `keys/fund_nft-mainnet.json`; the original `BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck` key is not in this repo). A testnet deploy should still use its own fresh keypair and `anchor keys sync` on a separate branch.
 
 For a testnet deploy, generate a new program keypair and sync it. Do not reuse a mainnet key.
 

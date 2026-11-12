@@ -16,7 +16,7 @@ pub use errors::*;
 pub use instructions::*;
 pub use state::*;
 
-declare_id!("BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck");
+declare_id!("6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM");
 
 #[program]
 pub mod fund_nft {

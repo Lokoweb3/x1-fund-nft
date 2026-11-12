@@ -7,10 +7,13 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-fund_nft = "BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck"
+fund_nft = "6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM"
 
 [programs.testnet]
-fund_nft = "BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck"
+fund_nft = "6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM"
+
+[programs.mainnet]
+fund_nft = "6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM"
 
 [provider]
 cluster = "localnet"

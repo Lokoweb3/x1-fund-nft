@@ -1,5 +1,5 @@
 {
-  "address": "BLMAQdL9dJtDakvDb1vbPpx6LVBbcWJiKThAHkz1g4ck",
+  "address": "6dmHtarR9KGE4CtkjhmXQLp4o8xXWAHuG11KeeN2nrUM",
   "metadata": {
     "name": "fund_nft",
     "version": "0.1.0",
@@ -394,17 +394,17 @@
     {
       "code": 6008,
       "name": "BadWindow",
-      "msg": "The TWAP window must be greater than zero"
+      "msg": "The TWAP window must be between 900 and 86400 seconds"
     },
     {
       "code": 6009,
       "name": "BadInterval",
-      "msg": "The DCA interval must be greater than zero"
+      "msg": "The DCA interval must be at least 60 seconds"
     },
     {
       "code": 6010,
       "name": "BadDeviation",
-      "msg": "max_dev_bps cannot exceed 10000"
+      "msg": "max_dev_bps cannot exceed 500"
     },
     {
       "code": 6011,
@@ -510,6 +510,51 @@
       "code": 6031,
       "name": "BadDestination",
       "msg": "The destination token account must belong to the NFT holder"
+    },
+    {
+      "code": 6032,
+      "name": "BadPoolProgram",
+      "msg": "The pool program is not the allowlisted XDEX program"
+    },
+    {
+      "code": 6033,
+      "name": "QuoteVaultDelta",
+      "msg": "The quote vault did not drop by exactly the tip plus the swap input"
+    },
+    {
+      "code": 6034,
+      "name": "VaultOwner",
+      "msg": "A fund vault is no longer owned by the fund"
+    },
+    {
+      "code": 6035,
+      "name": "VaultDelegate",
+      "msg": "A fund vault has a delegate"
+    },
+    {
+      "code": 6036,
+      "name": "VaultCloseAuthority",
+      "msg": "A fund vault has a close authority"
+    },
+    {
+      "code": 6037,
+      "name": "ZeroMinOut",
+      "msg": "The TWAP minimum output rounded to zero"
+    },
+    {
+      "code": 6038,
+      "name": "DisallowedMintExtension",
+      "msg": "The mint has a Token-2022 extension that is not on the allowlist"
+    },
+    {
+      "code": 6039,
+      "name": "BadMintAccount",
+      "msg": "The account is not an initialized SPL Token or Token-2022 mint"
+    },
+    {
+      "code": 6040,
+      "name": "TargetMintAccounts",
+      "msg": "Remaining accounts must be the non-cash target mints, in target order"
     }
   ],
   "types": [

@@ -47,7 +47,7 @@ RPC_URL=https://rpc.mainnet.x1.xyz npx tsx src/index.ts --dry-run
 
 `npm test` runs offline: it encodes a `Fund` account with the IDL's Borsh coder, decodes it through the keeper's decoder, checks due-target selection, and checks the cluster guard.
 
-`--dry-run` (or leaving `KEYPAIR` unset) prints the transactions and sends nothing; it needs no other flags. The keeper always calls `getGenesisHash` first, before any keypair is loaded, and maps the hash to `mainnet`, `testnet` or `localnet` (any hash that is not X1 mainnet or testnet). A send requires:
+`--dry-run` (or leaving `KEYPAIR` unset) prints the transactions and sends nothing; it needs no other flags. The keeper always calls `getGenesisHash` first, before any keypair is loaded, and maps the hash to `mainnet` or `testnet` (X1's known hashes), `localnet` (any other hash, but only when `RPC_URL` is a loopback address: 127.0.0.1, localhost or ::1), or `unknown`. Sends to an unknown chain are always refused. A send requires:
 
 - `KEYPAIR` pointing at a JSON keypair file;
 - `--cluster <mainnet|testnet|localnet>` matching the RPC's genesis hash, or the keeper refuses;
