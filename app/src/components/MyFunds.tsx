@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fundPda, parsePubkey, PROGRAM_ID } from "@core/owner.js";
-import { findFundsHeldBy, readFundMetadata, type HeldFund } from "@core/rpc.js";
+import { findFundsHeldBy, loadFundView, readFundMetadata, type FundView, type HeldFund } from "@core/rpc.js";
 import type { StoredMetadata } from "@core/metadata.js";
 import { useTokenLabels } from "../lib/lookups";
 import { bpsToPercent } from "../lib/wizard";
@@ -9,6 +9,8 @@ import { makeProgram } from "../lib/actions";
 import { createLatest } from "../lib/latest";
 import { signerId } from "../lib/session";
 import { errMsg, Short } from "./ui";
+import { ValueLine } from "./Holdings";
+import { loadValuation, type Valuation } from "../lib/value";
 
 /** Identity a fund list was loaded under: network generation, RPC and wallet. */
 function listKey(generation: number | undefined, rpcUrl: string | undefined, signer: string | null): string {
@@ -116,6 +118,7 @@ function FundItem({ s, f }: { s: AppState; f: HeldFund }) {
   const cash = f.account.targets.find((t) => t.mint.equals(f.account.quoteMint));
   return (
     <li data-testid="fund-item">
+      <FundValue s={s} f={f} quoteSymbol={q} />
       <div>
         <strong data-testid="fund-name">{stored ? `${stored.name} (${stored.symbol})` : "Unnamed fund"}</strong>{" "}
         <span className="small">
@@ -136,6 +139,31 @@ function FundItem({ s, f }: { s: AppState; f: HeldFund }) {
         NFT <Short value={f.nftMint.toBase58()} />
       </span>
     </li>
+  );
+}
+
+/** Estimated value of one listed fund, loaded on its own; a failure shows "value unknown". Display only. */
+function FundValue({ s, f, quoteSymbol }: { s: AppState; f: HeldFund; quoteSymbol: string }) {
+  const net = s.net;
+  const key = `${net?.generation}|${f.fund.toBase58()}|${s.sendTick}`;
+  const [st, setSt] = useState<{ key: string; view: FundView; valuation: Valuation } | { key: string; error: true } | null>(null);
+  useEffect(() => {
+    if (!net) return;
+    let cancelled = false;
+    (async () => {
+      const view = await loadFundView(net.connection, makeProgram(net), f.fund, BigInt(Math.floor(Date.now() / 1000)));
+      const valuation = await loadValuation(net.connection, view);
+      if (!cancelled) setSt({ key, view, valuation });
+    })().catch(() => !cancelled && setSt({ key, error: true }));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  const cur = st && st.key === key ? st : null;
+  if (cur && "error" in cur) return <ValueLine state={{ status: "error" }} view={null} quoteSymbol={quoteSymbol} />;
+  return (
+    <ValueLine state={cur ? { status: "ok", valuation: cur.valuation } : { status: "loading" }} view={cur ? cur.view : null} quoteSymbol={quoteSymbol} />
   );
 }
 

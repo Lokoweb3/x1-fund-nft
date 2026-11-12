@@ -14,6 +14,7 @@ import { reviewSetMetadata, type Labels } from "../lib/actions";
 import { useTokenLabels } from "../lib/lookups";
 import { bpsToPercent, countdown, humanInterval } from "../lib/wizard";
 import { ArtStep, type ArtResult } from "./ArtStep";
+import { HoldingsCard, useValuation } from "./Holdings";
 
 /** Light polling: at most every 30 s, only while the tab is visible. */
 const POLL_MS = 30_000;
@@ -118,6 +119,8 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
 
   const decimals = view?.quote.decimals ?? 0;
   const labels = useTokenLabels(net, view ? [view.account.quoteMint, ...view.account.targets.map((t) => t.mint)] : []);
+  // Display only: never passed to a review, a simulation or a transaction.
+  const valuation = useValuation(net?.connection, view);
 
   return (
     <>
@@ -138,6 +141,7 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
         {error && <p className="error">{error}</p>}
         {view && (
           <>
+            <HoldingsCard state={valuation} view={view} labels={labels} />
             <FundSummary view={view} labels={labels} />
             <dl className="kv">
               <div>
