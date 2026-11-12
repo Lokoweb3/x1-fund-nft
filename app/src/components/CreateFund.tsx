@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PublicKey } from "@solana/web3.js";
 import {
   BPS_SUM,
@@ -20,6 +20,8 @@ import { TOKEN_2022_PROGRAM_ID } from "@core/pool.js";
 import { maxTargetsThatFit, mintInfo } from "@core/rpc.js";
 import type { AppState } from "../App";
 import { BUDGET, makeProgram, reviewCreateFund, type Review } from "../lib/actions";
+import { createLatest } from "../lib/latest";
+import { signerId } from "../lib/session";
 import { ReviewPanel } from "./ReviewPanel";
 import { errMsg } from "./ui";
 
@@ -60,13 +62,24 @@ export function CreateFund({ s }: { s: AppState }) {
   const [window, setWindow] = useState("3600");
   const [maxDev, setMaxDev] = useState("300");
   const [simPayer, setSimPayer] = useState("");
-  const [quoteMeta, setQuoteMeta] = useState<MintMeta | null>(null);
+  // Tagged with the network generation it was read under (decimals differ per chain).
+  const [quoteMetaTagged, setQuoteMeta] = useState<{ generation: number; meta: MintMeta } | null>(null);
   const [quoteError, setQuoteError] = useState("");
   const [fit, setFit] = useState<{ withCash: number; withoutCash: number } | null>(null);
   const [review, setReview] = useState<Review | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const net = s.net;
+  const quoteMeta = quoteMetaTagged && net && quoteMetaTagged.generation === net.generation ? quoteMetaTagged.meta : null;
+  const builds = useRef(createLatest()).current;
+  const signerKey = signerId(s.signer);
+  // Network or signer change: drop any review and any review build in flight.
+  useEffect(() => {
+    builds.invalidate();
+    setReview(null);
+    setBusy(false);
+    setError("");
+  }, [net, signerKey, builds]);
 
   // Read the quote mint (decimals, token program) and compute the honest size limit.
   useEffect(() => {
@@ -86,7 +99,7 @@ export function CreateFund({ s }: { s: AppState }) {
           maxTargetsThatFit(program, payer, meta, false, BUDGET.instructions),
         ]);
         if (!cancelled) {
-          setQuoteMeta(meta);
+          setQuoteMeta({ generation: net.generation, meta });
           setFit({ withCash: a.maxNonCash, withoutCash: b.maxNonCash });
         }
       } catch (err) {
@@ -151,13 +164,17 @@ export function CreateFund({ s }: { s: AppState }) {
       return;
     }
     if (s.sendPending) return;
+    const gen = net.generation;
+    const builtFor = signerKey;
+    const fresh = () => s.live().generation === gen && s.live().signerId === builtFor;
     setBusy(true);
     try {
-      setReview(await reviewCreateFund(net, p, built.args));
+      const r = await builds.run(reviewCreateFund(net, p, built.args));
+      if (!r.stale && fresh()) setReview(r.value);
     } catch (err) {
-      setError(errMsg(err));
+      if (fresh()) setError(errMsg(err));
     } finally {
-      setBusy(false);
+      if (fresh()) setBusy(false);
     }
   };
 

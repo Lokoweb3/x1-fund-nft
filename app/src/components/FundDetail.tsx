@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PublicKey } from "@solana/web3.js";
 import { formatUi, parseUi, shellQuote } from "@core/owner.js";
 import { loadFundView, type FundView } from "@core/rpc.js";
 import type { AppState } from "../App";
 import { makeProgram, reviewDeposit, reviewEnsureVaults, reviewWithdraw, type Review } from "../lib/actions";
+import { createLatest, sameView, type ViewIdentity } from "../lib/latest";
+import { signerId } from "../lib/session";
 import { ReviewPanel } from "./ReviewPanel";
 import { CopyButton, errMsg, Short } from "./ui";
 
@@ -15,28 +17,52 @@ function iso(unix: bigint): string {
 }
 
 export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
-  const [view, setView] = useState<FundView | null>(null);
+  // The loaded view carries the identity it was read under; a reply for an
+  // older network generation, RPC or fund is dropped, never shown.
+  const [loaded, setLoaded] = useState<{ identity: ViewIdentity; view: FundView } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [review, setReview] = useState<Review | null>(null);
   const [busy, setBusy] = useState("");
   const [actionError, setActionError] = useState("");
   const net = s.net;
-  const fundKey = new PublicKey(fund);
+  const fundKey = useMemo(() => new PublicKey(fund), [fund]);
+  const loads = useRef(createLatest()).current;
+  const builds = useRef(createLatest()).current;
+  const current: ViewIdentity | undefined = net ? { generation: net.generation, rpcUrl: net.rpcUrl, fund } : undefined;
+  const currentRef = useRef(current);
+  currentRef.current = current;
 
   const load = useCallback(async () => {
     if (!net) return;
+    const identity: ViewIdentity = { generation: net.generation, rpcUrl: net.rpcUrl, fund };
     setLoading(true);
     try {
       const now = BigInt(Math.floor(Date.now() / 1000));
-      setView(await loadFundView(net.connection, makeProgram(net), new PublicKey(fund), now));
+      const r = await loads.run(loadFundView(net.connection, makeProgram(net), new PublicKey(fund), now));
+      if (r.stale || !sameView(identity, currentRef.current)) return;
+      setLoaded({ identity, view: r.value });
       setError("");
     } catch (err) {
+      if (!sameView(identity, currentRef.current)) return;
+      // A failed read must not leave older balances on screen.
+      setLoaded(null);
       setError(errMsg(err));
     } finally {
       setLoading(false);
     }
-  }, [net, fund]);
+  }, [net, fund, loads]);
+
+  // Network or fund change: drop the view, any review, and every load or
+  // review build still in flight.
+  useEffect(() => {
+    loads.invalidate();
+    builds.invalidate();
+    setLoaded(null);
+    setReview(null);
+    setError("");
+    setActionError("");
+  }, [net, fund, loads, builds]);
 
   useEffect(() => {
     void load();
@@ -52,16 +78,31 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
   }, [s.sendTick, load]);
 
   const payer = s.signer?.publicKey;
+  const signerKey = signerId(s.signer);
+  // A signer change makes any built review and any build in flight stale.
+  useEffect(() => {
+    builds.invalidate();
+    setReview(null);
+    setBusy("");
+  }, [signerKey, builds]);
+
+  const view = loaded && sameView(loaded.identity, current) ? loaded.view : null;
+  // Actions only for a view loaded under the current network and fund, with a signer, and no send in flight.
+  const actionsEnabled = !!view && !!payer && !s.sendPending && busy === "";
 
   const run = async (name: string, build: () => Promise<Review>) => {
-    if (s.sendPending) return;
+    if (s.sendPending || !current) return;
+    const identity = current;
+    const builtFor = signerKey;
     setActionError("");
     setReview(null);
     setBusy(name);
     try {
-      setReview(await build());
+      const r = await builds.run(build());
+      if (r.stale || !sameView(identity, currentRef.current) || s.live().signerId !== builtFor) return;
+      setReview(r.value);
     } catch (err) {
-      setActionError(errMsg(err));
+      if (sameView(identity, currentRef.current)) setActionError(errMsg(err));
     } finally {
       setBusy("");
     }
@@ -216,16 +257,16 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
           {!payer && <p className="muted small">Connect a wallet: each action builds and simulates with it as the fee payer.</p>}
           <DepositForm
             decimals={decimals}
-            disabled={!payer || busy !== "" || s.sendPending}
+            disabled={!actionsEnabled}
             onReview={(amount) => run("deposit", () => reviewDeposit(net, payer!, fundKey, amount))}
           />
           <WithdrawForm
             view={view}
-            disabled={!payer || busy !== "" || s.sendPending}
+            disabled={!actionsEnabled}
             onReview={(mint, amount) => run("withdraw", () => reviewWithdraw(net, payer!, fundKey, mint, amount))}
           />
           <div className="row wrap">
-            <button disabled={!payer || busy !== "" || s.sendPending} onClick={() => void run("ensure", () => reviewEnsureVaults(net, payer!, fundKey))} data-testid="ensure-vaults">
+            <button disabled={!actionsEnabled} onClick={() => void run("ensure", () => reviewEnsureVaults(net, payer!, fundKey))} data-testid="ensure-vaults">
               Ensure vaults
             </button>
             <span className="small muted">Creates any missing quote/target vault account. Idempotent.</span>
