@@ -25,6 +25,9 @@ export function ReviewPanel({ s, review, onClose }: { s: AppState; review: Revie
     blockers.push(`The active signer is not the payer this review was built for (${review.payer.toBase58()}). Build it again.`);
   }
   if (s.sendPending && !mine) blockers.push("Another send is in progress.");
+  if (review.signerEpoch === undefined || review.signerEpoch !== s.live().signerEpoch) {
+    blockers.push("The wallet connection changed since this review was built (connect, disconnect, account or wallet). Build it again.");
+  }
 
   return (
     <section className="panel review" data-testid="review">

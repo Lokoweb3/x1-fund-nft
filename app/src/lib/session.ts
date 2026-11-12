@@ -15,6 +15,14 @@ export interface SessionKey {
   rpcUrl: string;
   cluster: DetectedCluster;
   signerId: string | null;
+  /** The AppSigner object itself, compared with ===. */
+  signer: AppSigner | null;
+  /**
+   * Bumped synchronously by the wallet adapter's own connect, disconnect and
+   * readyStateChange events, by an adapter change, and by the test wallet.
+   * Any bump invalidates, even when the same key comes back.
+   */
+  signerEpoch: number;
   mainnetAck: boolean;
 }
 
@@ -28,6 +36,12 @@ export function sessionMismatch(expected: SessionKey, live: SessionKey): string 
     return `the network changed (was ${expected.cluster} ${expected.rpcUrl}, now ${live.cluster} ${live.rpcUrl || "none"})`;
   }
   if (live.signerId !== expected.signerId) return "the signer changed or disconnected";
+  // A public key alone is not an identity: another wallet, or a disconnect
+  // and reconnect, can present the same key.
+  if (live.signerEpoch !== expected.signerEpoch) {
+    return "the wallet connection changed (connect, disconnect, account or adapter change), even if the same key is back";
+  }
+  if (live.signer !== expected.signer) return "a different signer object is active";
   if (expected.cluster === "mainnet" && !live.mainnetAck) return "the mainnet acknowledgement was cleared";
   return undefined;
 }

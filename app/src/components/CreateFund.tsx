@@ -166,11 +166,12 @@ export function CreateFund({ s }: { s: AppState }) {
     if (s.sendPending) return;
     const gen = net.generation;
     const builtFor = signerKey;
-    const fresh = () => s.live().generation === gen && s.live().signerId === builtFor;
+    const epoch = s.live().signerEpoch;
+    const fresh = () => s.live().generation === gen && s.live().signerId === builtFor && s.live().signerEpoch === epoch;
     setBusy(true);
     try {
       const r = await builds.run(reviewCreateFund(net, p, built.args));
-      if (!r.stale && fresh()) setReview(r.value);
+      if (!r.stale && fresh()) setReview({ ...r.value, signerEpoch: epoch });
     } catch (err) {
       if (fresh()) setError(errMsg(err));
     } finally {

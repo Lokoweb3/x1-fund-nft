@@ -83,11 +83,20 @@ function reviewFor(net: NetworkInfo, payer: PublicKey): Review {
     accounts: [],
     simOk: true,
     nothingToDo: false,
+    signerEpoch: 7,
   };
 }
 
 function liveOf(net: NetworkInfo, signer: AppSigner, mainnetAck = false): SessionKey {
-  return { generation: net.generation, rpcUrl: net.rpcUrl, cluster: net.cluster, signerId: signerId(signer), mainnetAck };
+  return {
+    generation: net.generation,
+    rpcUrl: net.rpcUrl,
+    cluster: net.cluster,
+    signerId: signerId(signer),
+    signer,
+    signerEpoch: 7,
+    mainnetAck,
+  };
 }
 
 test("delayed genesis, then a network change: nothing is signed or sent", async () => {
@@ -122,7 +131,8 @@ test("delayed wallet return, then a context change: that tx and the rest are 'no
       assert.ok(err instanceof PlanSendError);
       assert.equal(err.state, "not sent");
       assert.equal(err.failedIndex, 0);
-      assert.match(err.message, /signed but not broadcast: session changed: the signer changed/);
+      // Caught immediately after the wallet promise resolved, before the NFT key or any broadcast.
+      assert.match(err.message, /could not be prepared .*session changed: the signer changed/);
       assert.match(err.message, /not sent: tx 1\/2 \(first\), tx 2\/2 \(second\)/);
       return true;
     },
@@ -184,11 +194,65 @@ test("a review built under an older network generation is refused before any cal
 });
 
 test("sessionMismatch names what changed", () => {
-  const base: SessionKey = { generation: 3, rpcUrl: LOCAL, cluster: "localnet", signerId: "wallet:A", mainnetAck: false };
+  const objA = createLocalTestWallet("localnet", () => "localnet");
+  const base: SessionKey = { generation: 3, rpcUrl: LOCAL, cluster: "localnet", signerId: "wallet:A", signer: objA, signerEpoch: 1, mainnetAck: false };
   assert.equal(sessionMismatch(base, base), undefined);
   assert.match(sessionMismatch(base, { ...base, generation: 4 })!, /network changed/);
   assert.match(sessionMismatch(base, { ...base, rpcUrl: MAINNET })!, /network changed/);
   assert.match(sessionMismatch(base, { ...base, signerId: "wallet:B" })!, /signer changed/);
+  // Same key, but the connection moved (disconnect + reconnect) or another signer object is active.
+  assert.match(sessionMismatch(base, { ...base, signerEpoch: 2 })!, /wallet connection changed.*even if the same key is back/);
+  const objB = { ...objA }; // same kind and public key, different object
+  assert.match(sessionMismatch(base, { ...base, signer: objB })!, /different signer object/);
   const main = { ...base, cluster: "mainnet" as const, rpcUrl: MAINNET, mainnetAck: true };
   assert.match(sessionMismatch(main, { ...main, mainnetAck: false })!, /acknowledgement/);
+});
+
+test("same-key signer swap during the genesis await: neither A nor B signs, nothing is sent", async () => {
+  const gate = deferred<string>();
+  const net = mockNet({ cluster: "localnet", genesis: () => gate.promise });
+  const kp = Keypair.generate();
+  let signs = 0;
+  const signWith = async (tx: import("@solana/web3.js").VersionedTransaction) => {
+    signs += 1;
+    tx.sign([kp]);
+    return tx;
+  };
+  const a = walletSigner("A", kp.publicKey, signWith);
+  const b = walletSigner("B", kp.publicKey, signWith); // same key, another adapter
+  let live = liveOf(net, a);
+  const sending = signAndSend({ net, review: reviewFor(net, kp.publicKey), signer: a, mainnetAck: false, getLive: () => live });
+  await tick();
+  live = { ...live, signer: b, signerEpoch: live.signerEpoch + 1 };
+  gate.resolve("localgenesis");
+  await assert.rejects(sending, /session changed: the wallet connection changed/);
+  assert.equal(signs, 0);
+  assert.equal(net.sent, 0);
+});
+
+test("an adapter event just before the wallet promise resolves: 0 broadcasts, all 'not sent'", async () => {
+  const net = mockNet({ cluster: "localnet" });
+  const kp = Keypair.generate();
+  let live: SessionKey;
+  let signs = 0;
+  const wallet = walletSigner("A", kp.publicKey, async (tx) => {
+    signs += 1;
+    tx.sign([kp]);
+    // disconnect + reconnect of the same account, fired as the prompt resolves
+    live = { ...live, signerEpoch: live.signerEpoch + 2 };
+    return tx;
+  });
+  live = liveOf(net, wallet);
+  await assert.rejects(
+    signAndSend({ net, review: reviewFor(net, kp.publicKey), signer: wallet, mainnetAck: false, getLive: () => live }),
+    (err: unknown) => {
+      assert.ok(err instanceof PlanSendError);
+      assert.equal(err.state, "not sent");
+      assert.equal(err.failedIndex, 0);
+      assert.match(err.message, /not sent: tx 1\/2 \(first\), tx 2\/2 \(second\)/);
+      return true;
+    },
+  );
+  assert.equal(signs, 1, "no further signature was requested");
+  assert.equal(net.sent, 0);
 });

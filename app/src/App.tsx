@@ -80,24 +80,67 @@ function Shell() {
   const sendPending = sends.some((r) => r.status === "pending");
   const pendingRef = useRef(false);
   pendingRef.current = sendPending;
+  const testWalletRef = useRef<AppSigner | null>(null);
+  testWalletRef.current = testWallet;
 
+  // The signer is bound to one adapter object; it signs through that adapter only.
+  const adapter = wallet.wallet?.adapter ?? null;
   const walletAppSigner = useMemo<AppSigner | null>(() => {
-    if (!wallet.publicKey || !wallet.signTransaction) return null;
-    return walletSigner(wallet.wallet?.adapter.name ?? "wallet", wallet.publicKey, wallet.signTransaction);
-  }, [wallet.publicKey, wallet.signTransaction, wallet.wallet]);
+    if (!adapter || !wallet.publicKey || !("signTransaction" in adapter)) return null;
+    const signerAdapter = adapter as typeof adapter & { signTransaction: <T>(tx: T) => Promise<T> };
+    return walletSigner(adapter.name, wallet.publicKey, (tx) => signerAdapter.signTransaction(tx));
+  }, [wallet.publicKey, adapter]);
   const signer = testWallet ?? walletAppSigner;
+
+  // Signer epoch: bumped synchronously from the adapter's own events (not on
+  // render), from adapter changes, and from the test wallet. A send captures
+  // it and stops if it moves, even if the same public key comes back.
+  const epochRef = useRef(0);
+  const [, setEpochTick] = useState(0);
+  const bumpSigner = useCallback(() => {
+    epochRef.current += 1;
+    liveRef.current = { ...liveRef.current, signerEpoch: epochRef.current };
+    setEpochTick(epochRef.current);
+  }, []);
 
   // The live session. Updated on every render AND synchronously by every
   // setter below, so a guard that runs between a state change and the next
   // render already sees the change.
-  const liveRef = useRef<SessionKey>({ generation: 0, rpcUrl: "", cluster: "unknown", signerId: null, mainnetAck: false });
+  const liveRef = useRef<SessionKey>({
+    generation: 0,
+    rpcUrl: "",
+    cluster: "unknown",
+    signerId: null,
+    signer: null,
+    signerEpoch: 0,
+    mainnetAck: false,
+  });
   liveRef.current = {
     generation: net?.generation ?? liveRef.current.generation,
     rpcUrl: net?.rpcUrl ?? "",
     cluster: net?.cluster ?? "unknown",
     signerId: signerId(signer),
+    signer,
+    signerEpoch: epochRef.current,
     mainnetAck,
   };
+
+  // Direct listeners on the active adapter. Attaching or detaching (adapter
+  // or wallet change) also bumps the epoch.
+  useEffect(() => {
+    if (!adapter) return;
+    bumpSigner();
+    const onEvent = () => bumpSigner();
+    adapter.on("connect", onEvent);
+    adapter.on("disconnect", onEvent);
+    adapter.on("readyStateChange", onEvent);
+    return () => {
+      adapter.off("connect", onEvent);
+      adapter.off("disconnect", onEvent);
+      adapter.off("readyStateChange", onEvent);
+      bumpSigner();
+    };
+  }, [adapter, bumpSigner]);
   const live = useCallback(() => liveRef.current, []);
 
   const setMainnetAck = (v: boolean) => {
@@ -105,7 +148,9 @@ function Shell() {
     setMainnetAckState(v);
   };
   const setTestWallet = (w: AppSigner | null) => {
-    liveRef.current = { ...liveRef.current, signerId: signerId(w ?? walletAppSigner) };
+    const next = w ?? walletAppSigner;
+    liveRef.current = { ...liveRef.current, signerId: signerId(next), signer: next };
+    bumpSigner();
     setTestWalletState(w);
   };
 
@@ -116,9 +161,15 @@ function Shell() {
     if (pendingRef.current) return;
     const gen = ++generation.current;
     // Invalidate the session now: drop the network, the mainnet tick and the test wallet.
-    liveRef.current = { generation: gen, rpcUrl: "", cluster: "unknown", signerId: liveRef.current.signerId, mainnetAck: false };
+    liveRef.current = { ...liveRef.current, generation: gen, rpcUrl: "", cluster: "unknown", mainnetAck: false };
     setNet(null);
     setMainnetAckState(false);
+    if (testWalletRef.current) {
+      // Dropping the test wallet is a signer change.
+      testWalletRef.current = null;
+      epochRef.current += 1;
+      liveRef.current = { ...liveRef.current, signer: null, signerId: null, signerEpoch: epochRef.current };
+    }
     setTestWalletState(null);
     setNetError("");
     let url: string;

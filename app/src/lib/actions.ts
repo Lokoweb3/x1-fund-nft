@@ -73,6 +73,12 @@ export interface Review {
   title: string;
   /** Network generation the review was built and simulated under. */
   generation: number;
+  /**
+   * Signer epoch when the review build started (set by the page that built
+   * it). A send requires the live epoch to be unchanged: any wallet connect,
+   * disconnect, account or adapter change since then needs a fresh review.
+   */
+  signerEpoch?: number;
   rpcUrl: string;
   cluster: NetworkInfo["cluster"];
   payer: PublicKey;
@@ -263,11 +269,15 @@ export async function signAndSend(input: {
   if (net.cluster === "mainnet" && !input.mainnetAck) {
     throw new Error('refusing to send to X1 mainnet: tick "I understand this is X1 mainnet and uses real funds" first');
   }
+  if (review.signerEpoch === undefined) throw new Error("this review has no signer epoch; build it again");
   const expected: SessionKey = {
     generation: review.generation,
     rpcUrl: review.rpcUrl,
     cluster: review.cluster,
     signerId: signerId(signer),
+    // Captured now and compared with === : the very object that signs.
+    signer,
+    signerEpoch: review.signerEpoch,
     mainnetAck: input.mainnetAck,
   };
   assertSession(expected, input.getLive());
@@ -281,7 +291,13 @@ export async function signAndSend(input: {
     connection: net.connection,
     plan: review.plan,
     payer: review.payer,
-    sign: signer.sign,
+    // Re-check immediately after the wallet promise resolves, before the
+    // NFT key adds its signature: an event during the prompt invalidates it.
+    sign: async (tx) => {
+      const signed = await signer.sign(tx);
+      assertSession(expected, input.getLive());
+      return signed;
+    },
     rpcUrl: net.rpcUrl,
     log: input.log ?? (() => {}),
     guard: sessionGuard(expected, input.getLive),

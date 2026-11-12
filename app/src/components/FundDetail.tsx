@@ -94,13 +94,15 @@ export function FundDetail({ s, fund }: { s: AppState; fund: string }) {
     if (s.sendPending || !current) return;
     const identity = current;
     const builtFor = signerKey;
+    const epoch = s.live().signerEpoch;
     setActionError("");
     setReview(null);
     setBusy(name);
     try {
       const r = await builds.run(build());
-      if (r.stale || !sameView(identity, currentRef.current) || s.live().signerId !== builtFor) return;
-      setReview(r.value);
+      const now = s.live();
+      if (r.stale || !sameView(identity, currentRef.current) || now.signerId !== builtFor || now.signerEpoch !== epoch) return;
+      setReview({ ...r.value, signerEpoch: epoch });
     } catch (err) {
       if (sameView(identity, currentRef.current)) setActionError(errMsg(err));
     } finally {
