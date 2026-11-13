@@ -108,6 +108,8 @@ Costs: `attach_metadata` costs the holder about **0.016 XNT** (the metadata acco
 
 **Withdraw native XNT** (holder only, `prepareWithdrawNative`) moves native XNT above the Fund account's rent-exempt minimum (reflections, direct transfers) to the holder's wallet; the page shows "Native XNT on the fund: X (available to withdraw: Y; Z stays for rent)", and a holdings row when Y > 0 (counted 1:1 in a WXNT fund). On a program without `withdraw_native` the simulation fails with Anchor error 101 and the review says the program must be upgraded first (docs/UPGRADE_WITHDRAW_NATIVE.md). **Fund detail** describes the fund in words ("Every 1 hour it spends…", "Next buy of TEST in 23 min", what is left to spend) above the tables, and has **Set image / edit metadata** for the NFT holder only (`prepareSetMetadata`: attach when there is none, otherwise an update of only the changed fields). **My funds** shows each NFT's stored name, symbol and uri, and "Create your first fund" when there are none. A dismissable **How it works** card (remembered in localStorage, inside try/catch) explains the model; "?" buttons explain fund, NFT, vault, pay-with, target, keeper, slippage and TWAP. Errors are explained with an action (for example "program not deployed" offers **Switch to Local validator to try it**), with the original text under "details".
 
+**Deposit**, **Withdraw** and **Withdraw XNT** are buttons on the NFT card of the fund page (`NftCardActions`, `lib/card_actions.ts`); each opens its form on the card, and the review and simulation path is unchanged. The buttons are display gating only: without a wallet all three are off, anyone connected can deposit, and the two withdrawals are on only for the NFT holder. When the NFT's token account is owned by a program address or by itself (an escrow, for example a marketplace listing), the card says "NFT is held by a program (e.g. listed for sale). Withdrawals are blocked until it returns to a wallet. If it sells, the buyer gets everything in the fund." and both withdrawals are off. The program enforces the real rules.
+
 ## Local testing before the program is deployed
 
 `scripts/local-validator.sh` starts a long-running loopback validator in X1 feature mode. It loads:
@@ -152,6 +154,7 @@ npm test                              # unit tests: test wallet refusal, RPC/exp
 
 # Picture fetch in a real Chromium, loopback only (no validator): an approved
 # host's redirect is not followed and the redirect target sees no request.
+# Also the card buttons: a run's progress and error show in one place only.
 PLAYWRIGHT_BROWSERS_PATH=/abs/scratch/pw-browsers npm run test:browser
 
 # Browser smoke + e2e (Playwright 1.56.1, chromium). It starts

@@ -101,15 +101,14 @@ REHEARSE_SCRATCH=/tmp/fund-rehearsal \
 
 Run the upgrade with `scripts/upgrade-withdraw-native.sh`. It fails closed: every check is an assertion, and `apply` reruns all of them before it spends anything. It runs in its own process, so a failure never exits your shell. It reads the keypair only by path, through `solana-keygen pubkey` and as the signer. Every `solana` and `solana-keygen` call it makes passes `-C` with its own temporary config, so `~/.config/solana` is not consulted.
 
-`<REVIEWED_COMMIT>` below is a placeholder. The lead fills in the final reviewed commit before handing this runbook over. Don't run with any other value.
+The reviewed commit is `6d1e2b7d7381c966264fca72e7e31f8401ed60ef` in the owner's local repository (branch `fundnft-next`). The lead ran the build, the tests and the full rehearsal on it from a fresh clone. Don't run with any other value. Commits after it on `fundnft-next` change only documentation and the Vercel build config (`vercel.json`, `.gitignore`). The public GitHub mirror holds the same files under different commit IDs, because its history was rewritten to remove private email addresses; run the upgrade from the local repository.
 
 ```sh
 cd ~/X1_PROJECTS/X1_FundNFT      # a checkout of the reviewed commit
-git fetch && git checkout <REVIEWED_COMMIT>
+git checkout 6d1e2b7d7381c966264fca72e7e31f8401ed60ef
 # REPLACE: the absolute path to the upgrade-authority keypair (pubkey HffqrD7V3SK5e15cALv2tJAZKUJN2FGrxBq72kvnmWGj).
 export DEPLOYER='/absolute/path/to/deployer.json'
-# REPLACE: the commit the lead names as reviewed.
-export EXPECT_COMMIT='<REVIEWED_COMMIT>'
+export EXPECT_COMMIT='6d1e2b7d7381c966264fca72e7e31f8401ed60ef'
 export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
 
 # 0. Save the program that is live now (read-only). This file is the
