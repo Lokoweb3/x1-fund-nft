@@ -8,7 +8,8 @@
 # uses it to create a fund, deposit, run execute_dca and attach metadata,
 # sends XNT to the fund PDA, then upgrades exactly as the owner would
 # (scripts/upgrade-withdraw-native.sh check / apply in UPGRADE_TARGET=local
-# mode, plus the manual extend it must not repeat), and checks that the
+# mode, plus the manual extend it must not repeat), covers what a third party
+# can do to ProgramData (anyone can extend it on X1 mainnet), and checks that the
 # PRE-EXISTING fund works under the new program: show, withdraw-native part
 # and all, a token withdraw, another execute_dca, and, after the NFT moves to
 # a second wallet, the old holder refused and the new holder allowed.
@@ -37,6 +38,14 @@
 # 18989-19030 and the Rust test's 18999/19000/19901, and is killed on exit.
 # The script refuses to continue if the RPC's genesis hash is X1 mainnet's or
 # testnet's.
+#
+# At the end a second, short-lived validator on the same ports runs with
+# SIMD-0431 (minimum extend) ACTIVE, to rehearse the upgrade script's
+# minimum-extend path. Nothing is cloned for it.
+#
+# One case overwrites target/deploy/fund_nft.so for a moment (to show that the
+# upgrade script deploys its private copy, not that path). The file is put
+# back straight after, and again by the exit trap.
 set -uo pipefail
 
 die() { echo "FATAL: $*" >&2; exit 2; }
@@ -96,8 +105,15 @@ case "$WORK" in "$SCRATCH"/fund-upgrade-rehearsal.??????) ;; *) die "work dir $W
 echo "work dir: $WORK"
 
 VALIDATOR_PID=""
+ARTIFACT_BACKUP=""
+ARTIFACT_PATH=""
+restore_artifact() {
+  [ -n "$ARTIFACT_BACKUP" ] && [ -f "$ARTIFACT_BACKUP" ] || return 0
+  cp -- "$ARTIFACT_BACKUP" "$ARTIFACT_PATH" || echo "WARNING: could not restore $ARTIFACT_PATH from $ARTIFACT_BACKUP" >&2
+}
 cleanup() {
   stop_validator
+  restore_artifact
   if [ "${REHEARSE_KEEP:-0}" = 1 ]; then
     echo "kept $WORK"
   else
@@ -202,7 +218,14 @@ HOLDER2_KEY="$WORK/holder2.json"   # receives the NFT at the end
 SECOND_KEY="$WORK/second-program.json" # a second instance for the auto-extend check
 THIRD_KEY="$WORK/third-program.json"   # a third instance for the upgrade script's extend path
 FOURTH_KEY="$WORK/fourth-program.json" # unknown code of the old size: must be refused
-for k in "$PAYER_KEY" "$AUTH_KEY" "$HOLDER2_KEY" "$SECOND_KEY" "$THIRD_KEY" "$FOURTH_KEY"; do
+FIFTH_KEY="$WORK/fifth-program.json"     # a third party extends by 1 byte before check/apply
+SIXTH_KEY="$WORK/sixth-program.json"     # a third party extends past the new length before apply
+SEVENTH_KEY="$WORK/seventh-program.json" # old build + a non-zero byte in the tail: must be refused
+EIGHTH_KEY="$WORK/eighth-program.json"   # new build + a non-zero byte in the tail: must be refused
+NINTH_KEY="$WORK/ninth-program.json"     # the artifact is swapped after it was verified
+SIMD_KEY="$WORK/simd-program.json"       # second validator, SIMD-0431 active
+for k in "$PAYER_KEY" "$AUTH_KEY" "$HOLDER2_KEY" "$SECOND_KEY" "$THIRD_KEY" "$FOURTH_KEY" \
+         "$FIFTH_KEY" "$SIXTH_KEY" "$SEVENTH_KEY" "$EIGHTH_KEY" "$NINTH_KEY" "$SIMD_KEY"; do
   solana-keygen new --no-bip39-passphrase --silent --force -o "$k" >/dev/null || die "keygen $k"
 done
 PAYER="$(solana-keygen pubkey "$PAYER_KEY")"
@@ -211,6 +234,12 @@ HOLDER2="$(solana-keygen pubkey "$HOLDER2_KEY")"
 SECOND_ID="$(solana-keygen pubkey "$SECOND_KEY")"
 THIRD_ID="$(solana-keygen pubkey "$THIRD_KEY")"
 FOURTH_ID="$(solana-keygen pubkey "$FOURTH_KEY")"
+FIFTH_ID="$(solana-keygen pubkey "$FIFTH_KEY")"
+SIXTH_ID="$(solana-keygen pubkey "$SIXTH_KEY")"
+SEVENTH_ID="$(solana-keygen pubkey "$SEVENTH_KEY")"
+EIGHTH_ID="$(solana-keygen pubkey "$EIGHTH_KEY")"
+NINTH_ID="$(solana-keygen pubkey "$NINTH_KEY")"
+SIMD_ID="$(solana-keygen pubkey "$SIMD_KEY")"
 # Same size as the mainnet build, one byte different (an error-message string).
 TAMPERED_SO="$WORK/tampered-old.so"
 python3 -I - "$OLD_SO" "$TAMPERED_SO" <<'PY' || die "make tampered .so"
@@ -222,6 +251,28 @@ open(sys.argv[2], "wb").write(d.replace(needle, b"Arithmetic overfloW", 1))
 PY
 [ "$(stat -c %s "$TAMPERED_SO")" = "$OLD_LEN" ] && [ "$(sha "$TAMPERED_SO")" != "$OLD_SHA" ] || die "tampered .so is not same-size different-hash"
 [ -n "$PAYER" ] && [ -n "$AUTH" ] && [ -n "$HOLDER2" ] && [ -n "$SECOND_ID" ] && [ -n "$THIRD_ID" ] || die "empty pubkeys"
+[ -n "$FIFTH_ID" ] && [ -n "$SIXTH_ID" ] && [ -n "$SEVENTH_ID" ] && [ -n "$EIGHTH_ID" ] && [ -n "$NINTH_ID" ] && [ -n "$SIMD_ID" ] ||
+  die "empty pubkeys"
+# Payloads no extend or deploy can produce, loaded as ProgramData directly:
+#   old build, zero padding up to the new length, but the last byte is 1;
+#   new build followed by a zero byte and a 1.
+# And the new build with one byte changed (same size): the "swapped" artifact.
+OLD_BADTAIL_SO="$WORK/old-nonzero-tail.so"
+NEW_BADTAIL_SO="$WORK/new-nonzero-tail.so"
+SWAPPED_SO="$WORK/swapped-new.so"
+python3 -I - "$OLD_SO" "$NEW_SO" "$OLD_BADTAIL_SO" "$NEW_BADTAIL_SO" "$SWAPPED_SO" <<'PY' || die "make crafted payloads"
+import sys
+old = open(sys.argv[1], "rb").read()
+new = open(sys.argv[2], "rb").read()
+assert len(new) > len(old)
+open(sys.argv[3], "wb").write(old + b"\0" * (len(new) - len(old) - 1) + b"\1")
+open(sys.argv[4], "wb").write(new + b"\0\1")
+needle = b"Arithmetic overflow"
+assert new.count(needle) >= 1
+open(sys.argv[5], "wb").write(new.replace(needle, b"Arithmetic overfloW", 1))
+PY
+[ "$(stat -c %s "$OLD_BADTAIL_SO")" = "$NEW_LEN" ] && [ "$(stat -c %s "$NEW_BADTAIL_SO")" = "$((NEW_LEN + 2))" ] || die "crafted payload sizes"
+[ "$(stat -c %s "$SWAPPED_SO")" = "$NEW_LEN" ] && [ "$(sha "$SWAPPED_SO")" != "$NEW_SHA" ] || die "swapped .so is not same-size different-hash"
 solana -C "$CFG" config set --url "$URL" --keypair "$PAYER_KEY" >/dev/null || die "config"
 echo "payer $PAYER, upgrade authority $AUTH, second holder $HOLDER2, second program $SECOND_ID"
 
@@ -265,23 +316,32 @@ start_validator -C "$CFG" --mint "$PAYER" --reset --quiet \
   --upgradeable-program "$SECOND_ID" "$OLD_SO" "$AUTH" \
   --upgradeable-program "$THIRD_ID" "$OLD_SO" "$AUTH" \
   --upgradeable-program "$FOURTH_ID" "$TAMPERED_SO" "$AUTH" \
+  --upgradeable-program "$FIFTH_ID" "$OLD_SO" "$AUTH" \
+  --upgradeable-program "$SIXTH_ID" "$OLD_SO" "$AUTH" \
+  --upgradeable-program "$SEVENTH_ID" "$OLD_BADTAIL_SO" "$AUTH" \
+  --upgradeable-program "$EIGHTH_ID" "$NEW_BADTAIL_SO" "$AUTH" \
+  --upgradeable-program "$NINTH_ID" "$OLD_SO" "$AUTH" \
   --url "$MAINNET_RPC" \
   --clone-upgradeable-program "$TOKENKEG" --clone-upgradeable-program "$TOKEN_2022" \
   --clone-upgradeable-program "$XDEX" --clone-upgradeable-program "$METAPLEX" \
   --account "$USDC" "$USDC_FILE" \
   "${CLONES[@]}" "${FEATURE_ARGS[@]}"
-[ -n "$VALIDATOR_PID" ] || die "validator did not start"
-for _ in $(seq 1 240); do
-  kill -0 "$VALIDATOR_PID" 2>/dev/null || { tail -40 "$WORK/validator.log"; die "validator exited"; }
-  solana -C "$CFG" cluster-version >/dev/null 2>&1 && break
-  sleep 0.5
-done
-solana -C "$CFG" cluster-version >/dev/null 2>&1 || { tail -40 "$WORK/validator.log"; die "validator not healthy"; }
-GENESIS="$(solana -C "$CFG" genesis-hash)" || die "genesis-hash"
-case "$GENESIS" in
-  "$X1_MAINNET_GENESIS"|"$X1_TESTNET_GENESIS") die "RPC $URL has X1 mainnet/testnet genesis $GENESIS; refusing" ;;
-esac
-echo "validator healthy, local genesis $GENESIS"
+# Wait for the validator just started, and refuse a public genesis.
+wait_validator() {
+  [ -n "$VALIDATOR_PID" ] || die "validator did not start"
+  for _ in $(seq 1 240); do
+    kill -0 "$VALIDATOR_PID" 2>/dev/null || { tail -40 "$WORK/validator.log"; die "validator exited"; }
+    solana -C "$CFG" cluster-version >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+  solana -C "$CFG" cluster-version >/dev/null 2>&1 || { tail -40 "$WORK/validator.log"; die "validator not healthy"; }
+  GENESIS="$(solana -C "$CFG" genesis-hash)" || die "genesis-hash"
+  case "$GENESIS" in
+    "$X1_MAINNET_GENESIS"|"$X1_TESTNET_GENESIS") die "RPC $URL has X1 mainnet/testnet genesis $GENESIS; refusing" ;;
+  esac
+  echo "validator healthy, local genesis $GENESIS"
+}
+wait_validator
 [ ! -e "$SOL_HOME/.config/solana/id.json" ] || die "a tool created a default wallet under $SOL_HOME"
 
 solana -C "$CFG" airdrop 20 "$PAYER" >/dev/null || die "airdrop payer"
@@ -325,6 +385,33 @@ programdata_len() {
 }
 programdata_addr() {
   solana -C "$CFG" program show "$1" --output json | jq -r '.programdataAddress'
+}
+rent_at() { solana -C "$CFG" rent "$1" --lamports | awk '/Rent-exempt minimum/ {print $3}'; }
+# sha256 of the first $2 bytes of the on-chain payload of program $1, and
+# whether everything after them is zero ("<sha> zero-tail" / "<sha> dirty-tail").
+onchain_prefix() {
+  solana -C "$CFG" program dump "$1" "$WORK/prefix-dump.so" >/dev/null 2>&1 || { echo "dump-failed"; return 0; }
+  python3 -I - "$WORK/prefix-dump.so" "$2" <<'PY'
+import hashlib, sys
+d = open(sys.argv[1], "rb").read()
+n = int(sys.argv[2])
+print(hashlib.sha256(d[:n]).hexdigest(), "dirty-tail" if any(d[n:]) else "zero-tail")
+PY
+}
+# Anyone can extend ProgramData on X1 mainnet. Here "anyone" is the second
+# holder's key, which is not the upgrade authority. The loader refuses two
+# extends or an extend and a deploy in one slot, so wait a moment after.
+third_party_extend() {
+  local id="$1" bytes="$2" name="$3" before
+  before="$(programdata_len "$id")"
+  if solana -C "$CFG" program extend "$id" "$bytes" --keypair "$HOLDER2_KEY" >"$OUT" 2>&1 &&
+     [ "$(programdata_len "$id")" = "$((before + bytes))" ]; then
+    pass "$name: a key that is not the upgrade authority extended ProgramData by $bytes ($before -> $((before + bytes)))"
+  else
+    fail "$name: third-party extend by $bytes"
+    sed 's/^/    /' "$OUT"
+  fi
+  sleep 2
 }
 
 # ---- the TWAP window: the cloned observation ring decides what is legal ----
@@ -464,7 +551,7 @@ upgrader() {
   local name="$1" expect="$2"; shift 2
   local code=0
   TMPDIR="$WORK" UPGRADE_TARGET=local UPGRADE_URL="$URL" UPGRADE_AUTHORITY="$AUTH" \
-    SOLANA_BIN_DIR="$SOLANA_BIN_DIR" bash "$UPGRADER" "$@" >"$OUT" 2>&1 || code=$?
+    SOLANA_BIN_DIR="${UPGRADER_BIN_DIR:-$SOLANA_BIN_DIR}" bash "$UPGRADER" "$@" >"$OUT" 2>&1 || code=$?
   if { [ "$expect" = ok ] && [ "$code" = 0 ]; } || { [ "$expect" = fail ] && [ "$code" != 0 ]; }; then
     pass "$name (exit $code)"
   else
@@ -472,6 +559,55 @@ upgrader() {
   fi
   sed 's/^/    /' "$OUT"
 }
+
+# fake_solana DIR SUBCOMMAND SNIPPET: a solana wrapper in DIR that runs the
+# bash SNIPPET whenever SUBCOMMAND is among its arguments, and otherwise (or
+# if the snippet does not exit) runs the real solana.
+fake_solana() {
+  local dir="$1" sub="$2" snippet="$3"
+  mkdir -p -- "$dir" || die "mkdir $dir"
+  printf '#!/usr/bin/env bash\nfor a in "$@"; do if [ "$a" = %q ]; then %s; fi; done\nexec %q "$@"\n' \
+    "$sub" "$snippet" "$SOLANA_BIN_DIR/solana" >"$dir/solana" || die "write $dir/solana"
+  chmod +x "$dir/solana" || die "chmod $dir/solana"
+  ln -s "$SOLANA_BIN_DIR/solana-keygen" "$dir/solana-keygen" || die "link solana-keygen"
+}
+# The extend amount apply uses, straight from the upgrade script (no chain).
+extend_by() {
+  local name="$1" len="$2" simd="$3" want="$4" got
+  got="$(TMPDIR="$WORK" UPGRADE_TARGET=local UPGRADE_URL="$URL" UPGRADE_AUTHORITY="$AUTH" \
+    SOLANA_BIN_DIR="$SOLANA_BIN_DIR" bash "$UPGRADER" extend-by "$len" "$simd" 2>&1)"
+  [ "$got" = "$want" ] && pass "extend-by $len $simd = $want ($name)" || fail "extend-by $len $simd = '$got', expected $want ($name)"
+}
+
+echo; echo "== upgrade script: the extend amount (unit check of extend_amount)"
+extend_by "old length" "$OLD_LEN" inactive "$DELTA"
+extend_by "old length + 1 byte from a third party" $((OLD_LEN + 1)) inactive $((DELTA - 1))
+extend_by "one byte short" $((NEW_LEN - 1)) inactive 1
+extend_by "already the new length" "$NEW_LEN" inactive 0
+extend_by "longer than the new build" $((NEW_LEN + 100)) inactive 0
+extend_by "SIMD-0431: old length, raised to the minimum" "$OLD_LEN" active 10240
+extend_by "SIMD-0431: one byte short, raised to the minimum" $((NEW_LEN - 1)) active 10240
+extend_by "SIMD-0431: exactly the minimum missing" $((NEW_LEN - 10240)) active 10240
+extend_by "SIMD-0431: more than the minimum missing" $((NEW_LEN - 10241)) active 10241
+extend_by "SIMD-0431: already the new length" "$NEW_LEN" active 0
+# extend_by_refused NAME LEN TEXT: extend-by must exit non-zero, print TEXT
+# and print no amount.
+extend_by_refused() {
+  local name="$1" len="$2" text="$3"
+  if (TMPDIR="$WORK" UPGRADE_TARGET=local UPGRADE_URL="$URL" UPGRADE_AUTHORITY="$AUTH" SOLANA_BIN_DIR="$SOLANA_BIN_DIR" \
+       bash "$UPGRADER" extend-by "$len" inactive >"$OUT" 2>&1); then
+    fail "extend-by accepted $name ('$len'): $(tr '\n' ' ' <"$OUT")"
+  elif grep -q "$text" "$OUT" && ! grep -Eq '^[0-9]+$' "$OUT"; then
+    pass "extend-by refuses $name ('$len')"
+  else
+    fail "extend-by $name ('$len'): refusal text: $(tr '\n' ' ' <"$OUT")"
+  fi
+}
+extend_by_refused "an empty data length" "" "not a decimal integer"
+extend_by_refused "a leading-zero data length (would be read as octal)" "0$OLD_LEN" "not a decimal integer"
+extend_by_refused "a data length of 2^64" 18446744073709551616 "not a decimal integer"
+extend_by_refused "a data length above 10 MiB" 10485761 "above the maximum 10485760"
+extend_by_refused "a negative data length" "-1" "not a decimal integer"
 
 echo; echo "== upgrade script: refusals"
 DEPLOYER="$HOLDER2_KEY" UPGRADE_SKIP_BUILD=1 upgrader "check with the wrong DEPLOYER key fails" fail check
@@ -509,8 +645,57 @@ else
     pass "a failed program dump is refused" || fail "dump failure refusal text"
 fi
 sed 's/^/    /' "$OUT"
+# CLI output that cannot be parsed must stop the script, never count as 0.
+fake_solana "$WORK/fakebin-feature-fail" feature 'echo "simulated feature status failure" >&2; exit 1'
+UPGRADER_BIN_DIR="$WORK/fakebin-feature-fail" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed when feature status cannot be read" fail check
+expect_out "unreadable feature status named" "FATAL: solana feature status [1-9A-HJ-NP-Za-km-z]+ failed: cannot tell whether SIMD-0431"
+expect_out "the on-chain code was authenticated before the feature status read" \
+  "PASS: on-chain code authenticated \(old\): the current build $OLD_SHA \(state: extend\)"
+fake_solana "$WORK/fakebin-feature-empty" feature 'echo "{\"features\":[]}"; exit 0'
+UPGRADER_BIN_DIR="$WORK/fakebin-feature-empty" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed when feature status has no status for SIMD-0431" fail check
+expect_out "missing feature status named" "FATAL: solana feature status [1-9A-HJ-NP-Za-km-z]+ returned status ''"
+fake_solana "$WORK/fakebin-rent" rent 'echo "Rent-exempt minimum: lamports"; exit 0'
+UPGRADER_BIN_DIR="$WORK/fakebin-rent" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on unparsable rent output (no silent zero)" fail check
+expect_out "unparsable rent named" "FATAL: solana rent [0-9]+ --lamports returned '[^']*', not a decimal integer"
+fake_solana "$WORK/fakebin-balance" balance 'echo "lamports"; exit 0'
+UPGRADER_BIN_DIR="$WORK/fakebin-balance" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on unparsable balance output" fail check
+expect_out "unparsable balance named" "FATAL: solana balance [1-9A-HJ-NP-Za-km-z]+ --lamports returned 'lamports', not a decimal integer"
+# Numbers that parse but are not canonical or are out of range.
+fake_solana "$WORK/fakebin-rent-huge" rent 'echo "Rent-exempt minimum: 9223372036854775807 lamports"; exit 0'
+UPGRADER_BIN_DIR="$WORK/fakebin-rent-huge" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on a rent of 2^63-1 (the sum would wrap negative)" fail check
+expect_out "huge rent named" "FATAL: solana rent [0-9]+ --lamports returned '9223372036854775807', not a decimal integer"
+if grep -q "DEPLOYER balance" "$OUT"; then fail "huge rent reached the balance check"; else pass "huge rent never reached the balance check"; fi
+fake_solana "$WORK/fakebin-rent-zero" rent 'echo "Rent-exempt minimum: 02872343280 lamports"; exit 0'
+UPGRADER_BIN_DIR="$WORK/fakebin-rent-zero" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on a leading-zero rent" fail check
+expect_out "leading-zero rent named" "FATAL: solana rent [0-9]+ --lamports returned '02872343280', not a decimal integer"
+# `program show` (not `show --buffers`) with a rewritten .dataLen.
+fake_show() {
+  fake_solana "$1" show "case \" \$* \" in *\" --buffers \"*) ;; *) $(printf '%q' "$SOLANA_BIN_DIR/solana") \"\$@\" | sed -E 's/\"dataLen\": *[0-9]+/\"dataLen\": $2/'; exit 0 ;; esac"
+}
+fake_show "$WORK/fakebin-len-zero" "\\\"0$OLD_LEN\\\""
+UPGRADER_BIN_DIR="$WORK/fakebin-len-zero" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on a leading-zero data length" fail check
+expect_out "leading-zero data length named" "FATAL: solana program show [1-9A-HJ-NP-Za-km-z]+ \(.dataLen\) returned '0$OLD_LEN', not a decimal integer"
+fake_show "$WORK/fakebin-len-big" 10485761
+UPGRADER_BIN_DIR="$WORK/fakebin-len-big" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on a data length above 10 MiB" fail check
+expect_out "oversized data length named" "FATAL: solana program show [1-9A-HJ-NP-Za-km-z]+ \(.dataLen\) returned '10485761', above the maximum 10485760"
+fake_show "$WORK/fakebin-len-huge" "\\\"18446744073709551616\\\""
+UPGRADER_BIN_DIR="$WORK/fakebin-len-huge" DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 \
+  upgrader "check fails closed on a data length of 2^64" fail check
+expect_out "2^64 data length named" "FATAL: solana program show [1-9A-HJ-NP-Za-km-z]+ \(.dataLen\) returned '18446744073709551616', not a decimal integer"
+[ "$(programdata_len "$PROGRAM_ID")" = "$OLD_DATA_LEN" ] && pass "the fail-closed checks sent nothing" || fail "a fail-closed check changed the chain"
 BOGUS_ID="$(solana-keygen pubkey "$PAYER_KEY")"
 DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$BOGUS_ID" UPGRADE_SKIP_BUILD=1 upgrader "a program id that is not a program is refused" fail check
+
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$THIRD_ID" UPGRADE_SKIP_BUILD=1 upgrader "third: check before the upgrade" ok check
+expect_out "check reports SIMD-0431 as inactive (as on X1 mainnet)" "SIMD-0431 minimum extend \([1-9A-HJ-NP-Za-km-z]+\): inactive"
 
 echo; echo "== upgrade script on a third instance: apply from the old length extends, then deploys"
 DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$THIRD_ID" UPGRADE_SKIP_BUILD=1 upgrader "third: apply (extend + deploy)" ok apply --i-understand-mainnet
@@ -520,6 +705,83 @@ expect_out "third: on-chain hash asserted" "PASS: on-chain program hash is $NEW_
 DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$THIRD_ID" UPGRADE_SKIP_BUILD=1 upgrader "third: apply again is a no-op" ok apply --i-understand-mainnet
 expect_out "third: second apply sees the upgrade" "already upgraded; nothing sent"
 [ "$(programdata_len "$THIRD_ID")" = "$NEW_LEN" ] && pass "third: not extended twice ($NEW_LEN)" || fail "third: extended twice"
+
+echo; echo "== anyone can extend ProgramData: after a finished upgrade"
+third_party_extend "$THIRD_ID" 1 "third"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$THIRD_ID" UPGRADE_SKIP_BUILD=1 upgrader "third: check after a third-party 1-byte extend" ok check
+expect_out "third: still reported as upgraded" "data length $((NEW_LEN + 1)) and the on-chain program is already $NEW_SHA followed by 1 zero bytes: nothing to do"
+expect_out "third: dump classified new+zero" "on-chain dump: $((NEW_LEN + 1)) bytes, sha256 [0-9a-f]+ \(new\+zero\)"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$THIRD_ID" UPGRADE_SKIP_BUILD=1 upgrader "third: apply after a third-party 1-byte extend is a no-op" ok apply --i-understand-mainnet
+expect_out "third: apply sends nothing" "already upgraded; nothing sent"
+[ "$(programdata_len "$THIRD_ID")" = "$((NEW_LEN + 1))" ] && pass "third: data length still $((NEW_LEN + 1))" || fail "third: data length $(programdata_len "$THIRD_ID")"
+
+echo; echo "== anyone can extend ProgramData: 1 byte before check and apply"
+third_party_extend "$FIFTH_ID" 1 "fifth"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$FIFTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "fifth: check after a third-party 1-byte extend" ok check
+expect_out "fifth: old build + 1 zero byte is accepted, extend by $((DELTA - 1))" \
+  "current build $OLD_SHA followed by 1 zero bytes; data length $((OLD_LEN + 1)): extend by $((DELTA - 1)) bytes, then deploy"
+expect_out "fifth: dump classified old+zero" "on-chain dump: $((OLD_LEN + 1)) bytes, sha256 [0-9a-f]+ \(old\+zero\)"
+FIFTH_EXTEND_RENT=$(( $(rent_at $((NEW_LEN + 45))) - $(rent_at $((OLD_LEN + 1 + 45))) ))
+expect_out "fifth: balance check counts the rent for $((DELTA - 1)) bytes ($FIFTH_EXTEND_RENT)" "needed: extend rent $FIFTH_EXTEND_RENT \+"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$FIFTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "fifth: apply (extend by $((DELTA - 1)) + deploy)" ok apply --i-understand-mainnet
+expect_out "fifth: extended by $((DELTA - 1))" "extending ProgramData by $((DELTA - 1)) bytes"
+expect_out "fifth: on-chain hash asserted" "PASS: on-chain program hash is $NEW_SHA"
+[ "$(programdata_len "$FIFTH_ID")" = "$NEW_LEN" ] && pass "fifth: data length $NEW_LEN" || fail "fifth: data length $(programdata_len "$FIFTH_ID")"
+[ "$(onchain_prefix "$FIFTH_ID" "$NEW_LEN")" = "$NEW_SHA zero-tail" ] && pass "fifth: on-chain code is the new build" ||
+  fail "fifth: on-chain code $(onchain_prefix "$FIFTH_ID" "$NEW_LEN")"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$FIFTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "fifth: check after the upgrade" ok check
+expect_out "fifth: upgraded" "\(state: upgraded\)"
+
+echo; echo "== anyone can extend ProgramData: past the new length before apply"
+third_party_extend "$SIXTH_ID" $((DELTA + 100)) "sixth"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$SIXTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "sixth: apply at data length $((NEW_LEN + 100)) (deploy only)" ok apply --i-understand-mainnet
+expect_out "sixth: no extend needed" "data length $((NEW_LEN + 100)), current build $OLD_SHA plus zero padding \(already extended, not yet deployed\): no extend, deploy only"
+if grep -q "extending ProgramData" "$OUT"; then fail "sixth: apply extended a ProgramData that was long enough"; else pass "sixth: apply did not extend"; fi
+expect_out "sixth: on-chain hash asserted over the build, not the whole dump" \
+  "PASS: on-chain program hash is $NEW_SHA \(first $NEW_LEN of $((NEW_LEN + 100)) bytes"
+[ "$(programdata_len "$SIXTH_ID")" = "$((NEW_LEN + 100))" ] && pass "sixth: data length still $((NEW_LEN + 100))" || fail "sixth: data length $(programdata_len "$SIXTH_ID")"
+[ "$(onchain_prefix "$SIXTH_ID" "$NEW_LEN")" = "$NEW_SHA zero-tail" ] && pass "sixth: first $NEW_LEN bytes are the new build, the rest zero" ||
+  fail "sixth: on-chain code $(onchain_prefix "$SIXTH_ID" "$NEW_LEN")"
+[ "$(sha "$WORK/prefix-dump.so")" != "$NEW_SHA" ] && pass "sixth: the whole-dump sha256 is not $NEW_SHA (why the script hashes the prefix)" ||
+  fail "sixth: whole-dump hash unexpectedly equals the build hash"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$SIXTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "sixth: check after the upgrade" ok check
+expect_out "sixth: upgraded" "already $NEW_SHA followed by 100 zero bytes: nothing to do"
+
+echo; echo "== padding that is not zero, or a wrong build before the padding, is refused"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$SEVENTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "seventh: old build + a non-zero tail byte is refused" fail check
+expect_out "seventh: unknown code named" "FAIL: on-chain code \(unknown, $NEW_LEN bytes\) at data length $NEW_LEN"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$SEVENTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "seventh: apply sends nothing" fail apply --i-understand-mainnet
+if grep -Eq "extending ProgramData|deploying " "$OUT"; then fail "seventh: apply tried to send"; else pass "seventh: apply did not extend or deploy"; fi
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$EIGHTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "eighth: new build + a non-zero tail byte is not 'upgraded'" fail check
+expect_out "eighth: unknown code named" "FAIL: on-chain code \(unknown, $((NEW_LEN + 2)) bytes\) at data length $((NEW_LEN + 2))"
+third_party_extend "$FOURTH_ID" 1 "fourth"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$FOURTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "fourth: wrong build + zero padding at another length is refused" fail check
+expect_out "fourth: unknown code named" "FAIL: on-chain code \(unknown, $((NEW_LEN + 1)) bytes\) at data length $((NEW_LEN + 1))"
+
+echo; echo "== the artifact is swapped after it was verified: the verified copy is what gets deployed"
+# The upgrade script always reads this path, whatever NEW_SO is.
+ARTIFACT_PATH="$REPO/target/deploy/fund_nft.so"
+[ "$(sha "$ARTIFACT_PATH")" = "$NEW_SHA" ] || die "$ARTIFACT_PATH is not $NEW_SHA before the swap case"
+cp -- "$ARTIFACT_PATH" "$WORK/artifact-backup.so" || die "back up $ARTIFACT_PATH"
+ARTIFACT_BACKUP="$WORK/artifact-backup.so"
+# genesis-hash is the first chain call, made after the artifact checks: the
+# wrapper overwrites target/deploy/fund_nft.so there, before extend and deploy.
+fake_solana "$WORK/fakebin-swap" genesis-hash "$(printf 'cp -- %q %q && echo swapped >>%q' "$SWAPPED_SO" "$ARTIFACT_PATH" "$WORK/swap.log")"
+UPGRADER_BIN_DIR="$WORK/fakebin-swap" DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$NINTH_ID" UPGRADE_SKIP_BUILD=1 \
+  upgrader "ninth: apply while target/deploy/fund_nft.so is overwritten after the checks" ok apply --i-understand-mainnet
+[ -s "$WORK/swap.log" ] && [ "$(sha "$ARTIFACT_PATH")" = "$(sha "$SWAPPED_SO")" ] &&
+  pass "ninth: target/deploy/fund_nft.so was overwritten during apply (sha256 $(sha "$ARTIFACT_PATH"))" ||
+  fail "ninth: the swap did not happen"
+expect_out "ninth: apply deployed its private copy" "^deploying $WORK/tmp\.[A-Za-z0-9]+/fund_nft\.so \(the verified private copy"
+expect_out "ninth: on-chain hash asserted" "PASS: on-chain program hash is $NEW_SHA"
+[ "$(onchain_prefix "$NINTH_ID" "$NEW_LEN")" = "$NEW_SHA zero-tail" ] && pass "ninth: the verified build is on chain, not the swapped file" ||
+  fail "ninth: on-chain code $(onchain_prefix "$NINTH_ID" "$NEW_LEN")"
+# With the swapped file still in place, a new check must fail on its hash.
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$SIXTH_ID" UPGRADE_SKIP_BUILD=1 upgrader "a check that starts with the swapped file fails" fail check
+expect_out "swapped file hash named" "FAIL: artifact sha256 $(sha "$SWAPPED_SO") != $NEW_SHA"
+restore_artifact
+[ "$(sha "$ARTIFACT_PATH")" = "$NEW_SHA" ] && pass "target/deploy/fund_nft.so restored ($NEW_SHA)" || die "could not restore $ARTIFACT_PATH"
+ARTIFACT_BACKUP=""
 
 echo; echo "== upgrade script on the real program id"
 DEPLOYER="$AUTH_KEY" upgrader "check (fresh build, read-only)" ok check
@@ -628,6 +890,83 @@ run_fail "$PAYER_KEY" "old holder token withdraw is rejected" "BadNft" \
   withdraw --fund "$FUND" --mint "$USDC" --amount 1 --send --cluster localnet
 
 [ -z "$(buffers_of_auth)" ] && pass "no buffers remain at the end" || fail "buffers remain at the end"
+
+# ================= rollback =================
+# The runbook's rollback: redeploy the build that was dumped from chain BEFORE
+# the upgrade ($WORK/onchain-old.so, taken above while the old program was
+# live). The first OLD_LEN bytes are the build; ProgramData is already long
+# enough, so no extend.
+echo; echo "== rollback to the pre-upgrade dump"
+ROLLBACK_SO="$WORK/fund_nft-pre-upgrade.so"
+head -c "$OLD_LEN" "$WORK/onchain-old.so" >"$ROLLBACK_SO" || die "cut the pre-upgrade dump"
+[ "$(sha "$ROLLBACK_SO")" = "$OLD_SHA" ] && pass "rollback file: first $OLD_LEN bytes of the pre-upgrade dump hash to $OLD_SHA" ||
+  fail "rollback file sha256 $(sha "$ROLLBACK_SO")"
+solana -C "$CFG" transfer "$FUND" 0.05 --keypair "$PAYER_KEY" >/dev/null 2>&1 && pass "0.05 XNT to the fund PDA before the rollback" || fail "transfer before rollback"
+if solana -C "$CFG" program deploy "$ROLLBACK_SO" --program-id "$PROGRAM_ID" --upgrade-authority "$AUTH_KEY" \
+     --keypair "$AUTH_KEY" --with-compute-unit-price 1000 >"$OUT" 2>&1; then
+  pass "rollback deploy of the pre-upgrade build"
+else
+  fail "rollback deploy"
+fi
+sed 's/^/    /' "$OUT"
+[ "$(programdata_len "$PROGRAM_ID")" = "$NEW_LEN" ] && pass "rollback: data length still $NEW_LEN (no extend needed)" ||
+  fail "rollback: data length $(programdata_len "$PROGRAM_ID")"
+[ "$(onchain_prefix "$PROGRAM_ID" "$OLD_LEN")" = "$OLD_SHA zero-tail" ] && pass "rollback: on-chain code is the old build + zero padding" ||
+  fail "rollback: on-chain code $(onchain_prefix "$PROGRAM_ID" "$OLD_LEN")"
+sleep 2
+run_ok "" "rollback: show still decodes the fund" show --fund "$FUND"
+run_ok "" "rollback: the old program executes (deposit simulation)" deposit --fund "$FUND" --amount 1000 --payer "$PAYER"
+expect_out "rollback: deposit simulation ok" "simulation: ok, [0-9]+ compute units"
+run_fail "$HOLDER2_KEY" "rollback: withdraw_native is unknown again" "\"Custom\":101" \
+  withdraw-native --fund "$FUND" --amount all
+DEPLOYER="$AUTH_KEY" UPGRADE_SKIP_BUILD=1 upgrader "rollback: check sees the old build, already long enough" ok check
+expect_out "rollback: state extended (apply would deploy only)" "\(state: extended\)"
+[ -z "$(buffers_of_auth)" ] && pass "rollback: no buffers remain" || fail "rollback: buffers remain"
+
+# ================= SIMD-0431 active =================
+echo; echo "== second validator: SIMD-0431 (minimum extend) active"
+stop_validator
+SIMD_FEATURE="YbbRLkvenrocjGPGyoQE4wjnvYzTgfsk38NFmcYK7a5"
+SIMD_FEATURE_ARGS=()
+SIMD_WAS_INACTIVE=0
+for f in "${INACTIVE[@]}"; do
+  if [ "$f" = "$SIMD_FEATURE" ]; then SIMD_WAS_INACTIVE=1; continue; fi
+  [ "$f" = "$X1_SYSVAR_SYSCALL_EXCEPTION" ] || SIMD_FEATURE_ARGS+=(--deactivate-feature "$f")
+done
+echo "X1 mainnet has SIMD-0431 inactive today: $([ "$SIMD_WAS_INACTIVE" = 1 ] && echo yes || echo no). Here it stays active; the other $(( ${#SIMD_FEATURE_ARGS[@]} / 2 )) X1-inactive features are deactivated."
+start_validator -C "$CFG" --mint "$PAYER" --reset --quiet \
+  --bind-address 127.0.0.1 --rpc-port "$RPC_PORT" --faucet-port $((RPC_PORT + 2)) \
+  --gossip-port $((RPC_PORT + 3)) --dynamic-port-range "$((RPC_PORT + 4))-$((RPC_PORT + 41))" \
+  --ledger "$WORK/ledger-simd" \
+  --upgradeable-program "$SIMD_ID" "$OLD_SO" "$AUTH" \
+  "${SIMD_FEATURE_ARGS[@]}"
+wait_validator
+solana -C "$CFG" airdrop 10 "$AUTH" >/dev/null || die "airdrop authority (second validator)"
+sleep 2
+if solana -C "$CFG" program extend "$SIMD_ID" "$DELTA" --keypair "$AUTH_KEY" >"$OUT" 2>&1; then
+  fail "simd: a $DELTA-byte extend was accepted, so SIMD-0431 is not active here"
+else
+  grep -q "minimum of 10240 additional bytes" "$OUT" && pass "simd: a plain $DELTA-byte extend is refused (minimum 10240)" ||
+    fail "simd: $DELTA-byte extend failed without the minimum-extend message"
+fi
+sed 's/^/    /' "$OUT"
+[ "$(programdata_len "$SIMD_ID")" = "$OLD_LEN" ] && pass "simd: data length still $OLD_LEN" || fail "simd: data length $(programdata_len "$SIMD_ID")"
+SIMD_EXTEND_RENT=$(( $(rent_at $((OLD_LEN + 10240 + 45))) - $(rent_at $((OLD_LEN + 45))) ))
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$SIMD_ID" UPGRADE_SKIP_BUILD=1 upgrader "simd: check" ok check
+expect_out "simd: check reports the feature as active" "SIMD-0431 minimum extend \($SIMD_FEATURE\): ACTIVE"
+expect_out "simd: extend raised to 10240" "data length $OLD_LEN: extend by 10240 bytes, then deploy"
+expect_out "simd: balance check counts the rent for 10240 bytes ($SIMD_EXTEND_RENT)" "needed: extend rent $SIMD_EXTEND_RENT \+"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$SIMD_ID" UPGRADE_SKIP_BUILD=1 upgrader "simd: apply (extend by 10240 + deploy)" ok apply --i-understand-mainnet
+expect_out "simd: extended by 10240" "extending ProgramData by 10240 bytes"
+expect_out "simd: on-chain hash asserted" "PASS: on-chain program hash is $NEW_SHA \(first $NEW_LEN of $((OLD_LEN + 10240)) bytes"
+[ "$(programdata_len "$SIMD_ID")" = "$((OLD_LEN + 10240))" ] && pass "simd: data length $((OLD_LEN + 10240))" || fail "simd: data length $(programdata_len "$SIMD_ID")"
+[ "$(onchain_prefix "$SIMD_ID" "$NEW_LEN")" = "$NEW_SHA zero-tail" ] && pass "simd: on-chain code is the new build" ||
+  fail "simd: on-chain code $(onchain_prefix "$SIMD_ID" "$NEW_LEN")"
+DEPLOYER="$AUTH_KEY" UPGRADE_PROGRAM_ID="$SIMD_ID" UPGRADE_SKIP_BUILD=1 upgrader "simd: apply again is a no-op at the longer length" ok apply --i-understand-mainnet
+expect_out "simd: upgraded" "already $NEW_SHA followed by $((OLD_LEN + 10240 - NEW_LEN)) zero bytes: nothing to do"
+expect_out "simd: nothing sent" "already upgraded; nothing sent"
+[ -z "$(buffers_of_auth)" ] && pass "simd: no buffers remain" || fail "simd: buffers remain"
+stop_validator
 
 echo
 echo "upgrade rehearsal: $PASS passed, $FAIL failed (old $OLD_SHA -> new $NEW_SHA, extend $DELTA bytes, window $WINDOW s)"
